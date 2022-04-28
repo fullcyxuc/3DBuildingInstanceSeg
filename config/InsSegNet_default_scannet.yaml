@@ -1,0 +1,79 @@
+GENERAL:
+  task: train  # train, test
+  manual_seed: 123
+  model_dir: Model/model.py
+  dataset_dir: data/scannetv2_inst.py
+  device: "cuda"
+
+DATA:
+  data_root: /media/xue/DATA/xue
+  dataset: scannetv2
+  filename_suffix: _inst_nostuff.pth
+
+  classes: 20
+  ignore_label: -100
+
+  input_channel: 3
+  scale: 50   # voxel_size = 1 / scale, scale 50(2cm) Deprecated
+  batch_size: 1
+  full_scale: [128, 512]  # Deprecated
+  max_npoint: 12000
+  mode: 4 # 4=mean
+
+  candidate_scale: 150  # 1 / scale, 1 candidate for every 200 points
+
+STRUCTURE:
+  model_name: InsSegNet
+  m: 16 # 16 or 32
+  out_channel: 256
+  using_xyz: True
+  using_rgb: True
+  using_normal: False
+  block_residual: True  # Deprecated
+  block_reps: 2  # Deprecated
+
+  use_coords: True
+
+TRAIN:
+  epochs: 384
+  train_workers: 16 # data loader workers
+  optim: Adam # Adam or SGD
+  lr: 0.001
+  step_epoch: 384
+  multiplier: 0.5
+  momentum: 0.9
+  weight_decay: 0.0001
+  save_freq: 16  # also eval_freq
+  loss_weight: [1.0, 1.0, 1.0, 1.0] # semantic_loss, offset_norm_loss, offset_dir_loss, score_loss
+
+  fg_thresh: 0.75
+  bg_thresh: 0.25
+
+  sigma_1: 0.5  # for the embedding loss
+  sigma_2: 1.5
+
+  score_scale: 50 # the minimal voxel size is 2cm   Deprecated
+  score_fullscale: 14  # Deprecated
+  score_mode: 4 # mean
+
+  pretrain_path:
+  pretrain_module: []
+  fix_module: []
+
+  prepare_epochs: 128
+
+TEST:
+  split: val
+  test_epoch: 384
+  test_workers: 16
+  test_seed: 567
+
+  TEST_NMS_THRESH: 0.3
+  TEST_SCORE_THRESH: 0.09
+  TEST_NPOINT_THRESH: 100
+
+  eval: True
+  save_semantic: False
+  save_pt_offsets: False
+  save_instance: False
+
