@@ -6,26 +6,26 @@ GENERAL:
   device: "cuda"
 
 DATA:
-  data_root: /media/xue/DATA/xue
-  dataset: scannetv2
-  filename_suffix: _inst_nostuff.pth
+  data_root: /media/xue/DATA/xue/UrbanSet/urban_merge/
+  dataset: subsampling0.4
+  filename_suffix: .txt   # _inst_nostuff.pth
 
-  classes: 20
+  classes: 2
   ignore_label: -100
 
   input_channel: 3
-  scale: 50   # voxel_size = 1 / scale, scale 50(2cm) Deprecated
+  scale: 2.5   # voxel_size = 1 / scale, scale 50(2cm) Deprecated
   batch_size: 1
   full_scale: [128, 512]  # Deprecated
-  max_npoint: 12000
+  max_npoint: 60000
   mode: 4 # 4=mean
 
-  candidate_scale: 150  # 1 / scale, 1 candidate for every 200 points
+  candidate_scale: 10000  # 1 / scale, 1 candidate for every 200 points
+  max_candidate: 150
 
 STRUCTURE:
   model_name: InsSegNet
-  m: 16 # 16 or 32
-  out_channel: 256
+  m: 32 # 16 or 32
   using_xyz: True
   using_rgb: True
   using_normal: False
@@ -51,8 +51,11 @@ TRAIN:
 
   sigma_1: 0.5  # for the embedding loss
   sigma_2: 1.5
+  weight_push: 1
+  weight_pull: 1
+  weight_reg: 0.001
 
-  score_scale: 50 # the minimal voxel size is 2cm   Deprecated
+  score_scale: 2.5 # the minimal voxel size is 2cm   Deprecated
   score_fullscale: 14  # Deprecated
   score_mode: 4 # mean
 

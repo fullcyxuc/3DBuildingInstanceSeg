@@ -2,349 +2,682 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-from Model.gr_module import GroupRelationAggregator
-from Model.pointnet_module import PointNetEncoder
-from OP import pointnet2_utils
+import spconv
+from spconv.modules import SparseModule
+import functools
+from collections import OrderedDict
 
+from lib.pcdet.ops.pointnet2.pointnet2_stack import pointnet2_utils
+from lib.pointgroup_ops.functions import pointgroup_ops
 
-class RelationNet(nn.Module):
-	def __init__(self, in_channel, out_channel):
-		super(RelationNet, self).__init__()
-		self.in_channel = in_channel
-		self.out_channel = out_channel
-		self.conv1 = nn.Sequential(nn.Conv2d(2 * in_channel, in_channel, kernel_size=1, bias=False),
-								   nn.BatchNorm2d(in_channel),
-								   nn.LeakyReLU(negative_slope=0.2))
-		self.conv2 = nn.Sequential(nn.Conv2d(in_channel, 2 * in_channel, kernel_size=1, bias=False),
-								   nn.BatchNorm2d(2 * in_channel),
-								   nn.LeakyReLU(negative_slope=0.2))
-		self.conv3 = nn.Sequential(nn.Conv2d(2 * in_channel, 2 * in_channel, kernel_size=1, bias=False),
-								   nn.BatchNorm2d(2 * in_channel),
-								   nn.LeakyReLU(negative_slope=0.2))
-		self.fc1 = nn.Linear(2 * in_channel, 128)
-		self.bn1 = nn.BatchNorm1d(128)
-		self.fc2 = nn.Linear(128, self.out_channel)
-		self.bn2 = nn.BatchNorm1d(self.out_channel)
-
-	def forward(self, point_feature, center_feature):
-		batch_size, num_point, _ = point_feature.shape
-		_, num_center, _ = center_feature.shape
-		point_feature = point_feature.unsqueeze(2).repeat((1, 1, num_center, 1))
-		center_feature = center_feature.unsqueeze(1).repeat((1, num_point, 1, 1))
-		feature = torch.cat((point_feature, center_feature), dim=3)
-		feature = feature.permute(0, 3, 1, 2).contiguous()
-		feature = self.conv1(feature)
-		feature = self.conv2(feature)
-		feature = self.conv3(feature)
-		feature = feature.max(dim=-1, keepdim=False)[0].permute(0, 2, 1)  # todo
-		feature = self.fc1(feature).permute(0, 2, 1).contiguous()
-		feature = F.relu(self.bn1(feature)).permute(0, 2, 1).contiguous()
-		feature = self.fc2(feature).permute(0, 2, 1).contiguous()
-		feature = F.relu(self.bn2(feature)).permute(0, 2, 1).contiguous()
-
-		return feature
+from util import utils
 
 
 class ScoreNet(nn.Module):
-	def __init__(self, in_channel, out_channel):
-		super().__init__()
-		self.conv1 = nn.Conv1d(in_channel, in_channel // 2, 1)
-		self.conv2 = nn.Conv1d(in_channel // 2, in_channel // 4, 1)
-		self.conv3 = nn.Conv1d(in_channel // 4, out_channel, 1)
+    def __init__(self, in_channel, out_channel):
+        super().__init__()
+        self.conv1 = nn.Conv1d(in_channel, in_channel // 2, 1)
+        self.conv2 = nn.Conv1d(in_channel // 2, in_channel // 4, 1)
+        self.conv3 = nn.Conv1d(in_channel // 4, out_channel, 1)
 
-		self.bn1 = nn.BatchNorm1d(in_channel // 2)
-		self.bn2 = nn.BatchNorm1d(in_channel // 4)
-		self.bn3 = nn.BatchNorm1d(out_channel)
+        self.bn1 = nn.BatchNorm1d(in_channel // 2)
+        self.bn2 = nn.BatchNorm1d(in_channel // 4)
+        self.bn3 = nn.BatchNorm1d(out_channel)
 
-	def forward(self, xyz, feats):
-		if feats is None:
-			x = torch.cat((xyz, xyz), dim=2)
-		else:
-			x = torch.cat((xyz, feats), dim=2)
-		x = x.permute(0, 2, 1).contiguous()
+    def forward(self, xyz, feats):
+        if feats is None:
+            x = torch.cat((xyz, xyz), dim=2)
+        else:
+            x = torch.cat((xyz, feats), dim=2)
+        x = x.permute(0, 2, 1).contiguous()
 
-		x = F.relu(self.bn1(self.conv1(x)))
-		x = F.relu(self.bn2(self.conv2(x)))
-		x = self.bn3(self.conv3(x))
+        x = F.relu(self.bn1(self.conv1(x)))
+        x = F.relu(self.bn2(self.conv2(x)))
+        x = self.bn3(self.conv3(x))
 
-		return x.permute(0, 2, 1).contiguous()
+        return x.permute(0, 2, 1).contiguous()
 
 
-class FeatureExtraction(nn.Module):
-	def __init__(self, device, m):
-		super(FeatureExtraction, self).__init__()
-		self.device = device
-		self.GRA1 = GroupRelationAggregator(3, m, device=self.device)
-		self.GRA2 = GroupRelationAggregator(m, m * 2, device=self.device)
-		self.GRA3 = GroupRelationAggregator(m * 2, m * 4, device=self.device)
-		self.GRA4 = GroupRelationAggregator(m * 4, m * 8, device=self.device)
+class ResidualBlock(SparseModule):
+    def __init__(self, in_channels, out_channels, norm_fn, indice_key=None):
+        super().__init__()
 
-	def forward(self, xyz, feats):
-		if feats is None:
-			feature = torch.cat((xyz, xyz), dim=2)
-		else:
-			feature = torch.cat((xyz, feats), dim=2)
-		feature = self.GRA1(feature)
-		feature = torch.cat((xyz, feature), dim=2)
-		feature = self.GRA2(feature)
-		feature = torch.cat((xyz, feature), dim=2)
-		feature = self.GRA3(feature)
-		feature = torch.cat((xyz, feature), dim=2)
-		feature = self.GRA4(feature)
+        if in_channels == out_channels:
+            self.i_branch = spconv.SparseSequential(
+                nn.Identity()
+            )
+        else:
+            self.i_branch = spconv.SparseSequential(
+                spconv.SubMConv3d(in_channels, out_channels, kernel_size=1, bias=False)
+            )
 
-		return feature
+        self.conv_branch = spconv.SparseSequential(
+            norm_fn(in_channels),
+            nn.ReLU(),
+            spconv.SubMConv3d(in_channels, out_channels, kernel_size=3, padding=1, bias=False, indice_key=indice_key),
+            norm_fn(out_channels),
+            nn.ReLU(),
+            spconv.SubMConv3d(out_channels, out_channels, kernel_size=3, padding=1, bias=False, indice_key=indice_key)
+        )
+
+    def forward(self, input):
+        identity = spconv.SparseConvTensor(input.features, input.indices, input.spatial_shape, input.batch_size)
+
+        output = self.conv_branch(input)
+        output.features += self.i_branch(identity).features
+
+        return output
+
+
+class VGGBlock(SparseModule):
+    def __init__(self, in_channels, out_channels, norm_fn, indice_key=None):
+        super().__init__()
+
+        self.conv_layers = spconv.SparseSequential(
+            norm_fn(in_channels),
+            nn.ReLU(),
+            spconv.SubMConv3d(in_channels, out_channels, kernel_size=3, padding=1, bias=False, indice_key=indice_key)
+        )
+
+    def forward(self, input):
+        return self.conv_layers(input)
+
+
+class UBlock(nn.Module):
+    def __init__(self, nPlanes, norm_fn, block_reps, block, indice_key_id=1):
+
+        super().__init__()
+
+        self.nPlanes = nPlanes
+
+        blocks = {'block{}'.format(i): block(nPlanes[0], nPlanes[0], norm_fn, indice_key='subm{}'.format(indice_key_id))
+                  for i in range(block_reps)}
+        blocks = OrderedDict(blocks)
+        self.blocks = spconv.SparseSequential(blocks)
+
+        if len(nPlanes) > 1:
+            self.conv = spconv.SparseSequential(
+                norm_fn(nPlanes[0]),
+                nn.ReLU(),
+                spconv.SparseConv3d(nPlanes[0], nPlanes[1], kernel_size=2, stride=2, bias=False,
+                                    indice_key='spconv{}'.format(indice_key_id))
+            )
+
+            self.u = UBlock(nPlanes[1:], norm_fn, block_reps, block, indice_key_id=indice_key_id + 1)
+
+            self.deconv = spconv.SparseSequential(
+                norm_fn(nPlanes[1]),
+                nn.ReLU(),
+                spconv.SparseInverseConv3d(nPlanes[1], nPlanes[0], kernel_size=2, bias=False,
+                                           indice_key='spconv{}'.format(indice_key_id))
+            )
+
+            blocks_tail = {}
+            for i in range(block_reps):
+                blocks_tail['block{}'.format(i)] = block(nPlanes[0] * (2 - i), nPlanes[0], norm_fn,
+                                                         indice_key='subm{}'.format(indice_key_id))
+            blocks_tail = OrderedDict(blocks_tail)
+            self.blocks_tail = spconv.SparseSequential(blocks_tail)
+
+    def forward(self, input):
+        output = self.blocks(input)
+        identity = spconv.SparseConvTensor(output.features, output.indices, output.spatial_shape, output.batch_size)
+
+        if len(self.nPlanes) > 1:
+            output_decoder = self.conv(output)
+            output_decoder = self.u(output_decoder)
+            output_decoder = self.deconv(output_decoder)
+
+            output.features = torch.cat((identity.features, output_decoder.features), dim=1)
+
+            output = self.blocks_tail(output)
+
+        return output
 
 
 class InstanceSegPipline(nn.Module):
-	def __init__(self, cfg):
-		super().__init__()
-		self.m = cfg.m
-		self.device = cfg.device
-		self.prepare_epochs = cfg.prepare_epochs
-		self.num_classes = cfg.classes
-		self.cfg = cfg
+    def __init__(self, cfg):
+        super().__init__()
+        input_c = cfg.input_channel
+        m = cfg.m
+        classes = cfg.classes
+        block_reps = cfg.block_reps
+        block_residual = cfg.block_residual
 
-		# backbone
-		# self.backbone = FeatureExtraction(self.device, self.m)
-		in_channel = 0
-		if cfg.using_xyz:
-			in_channel += 3
-		if cfg.using_rgb:
-			in_channel += 3
-		if cfg.using_normal:
-			in_channel += 3
+        self.prepare_epochs = cfg.prepare_epochs
 
-		self.backbone = PointNetEncoder(in_channel, cfg.out_channel, self.m)
+        self.pretrain_path = cfg.pretrain_path
+        self.pretrain_module = cfg.pretrain_module
+        self.fix_module = cfg.fix_module
 
-		# semantic segmentation
-		self.semantic_linear = nn.Linear(cfg.out_channel, self.num_classes)  # bias(default): True
+        norm_fn = functools.partial(nn.BatchNorm1d, eps=1e-4, momentum=0.1)
 
-		# attentive map
-		self.relation_net = RelationNet(cfg.out_channel, self.m)
+        if block_residual:
+            block = ResidualBlock
+        else:
+            block = VGGBlock
 
-		# scorenet
-		self.score_net = ScoreNet(cfg.out_channel + 3, self.m)
-		self.score_linear = nn.Linear(self.m, 1)
+        if cfg.use_coords:
+            input_c += 3
 
-	def select(self, xyz, feats, candidates_num):
-		"""
+        #### backbone
+        self.input_conv = spconv.SparseSequential(
+            spconv.SubMConv3d(input_c, self.m, kernel_size=3, padding=1, bias=False, indice_key='subm1')
+        )
+
+        self.unet = UBlock([m, 2 * m, 3 * m, 4 * m, 5 * m, 6 * m, 7 * m], norm_fn, block_reps, block,
+                           indice_key_id=1)
+
+        self.output_layer = spconv.SparseSequential(
+            norm_fn(m),
+            nn.ReLU()
+        )
+
+        #### semantic segmentation
+        self.semantic_encoder = nn.Sequential(
+            nn.Linear(m, m, bias=True),
+            norm_fn(m),
+            nn.ReLU()
+        )
+        self.semantic_linear = nn.Linear(m, classes)  # bias(default): True
+
+        #### instance-aware embedding feature extractor
+        self.embedding_encoder = nn.Sequential(
+            nn.Linear(m, m, bias=True),
+            norm_fn(m),
+            nn.ReLU()
+        )
+
+        #### position encoder
+        self.position_encoder = nn.Sequential(
+            nn.Linear(3, m, bias=True),
+            norm_fn(m),
+            nn.ReLU()
+        )
+
+        #### offset
+        self.offset_encoder = nn.Sequential(
+            nn.Linear(m, m, bias=True),
+            norm_fn(m),
+            nn.ReLU()
+        )
+        self.offset_linear = nn.Linear(m, 3, bias=True)
+
+        #### score branch
+        self.score_unet = UBlock([m, 2 * m], norm_fn, 2, block, indice_key_id=1)
+        self.score_outputlayer = spconv.SparseSequential(
+            norm_fn(m),
+            nn.ReLU()
+        )
+        self.score_linear = nn.Linear(m, 1)
+
+        #### scorenet
+        # self.score_net = ScoreNet(cfg.m + 3, self.m)
+        # self.score_linear = nn.Linear(self.m, 1)
+
+        self.apply(self.set_bn_init)
+
+        #### fix parameter
+        module_map = {'input_conv': self.input_conv, 'unet': self.unet, 'output_layer': self.output_layer,
+                      'semantic_encoder': self.semantic_encoder, 'semantic_linear': self.semantic_linear,
+                      'embedding_encoder': self.embedding_encoder, 'position_encoder': self.position_encoder,
+                      'offset_encoder': self.offset_encoder, 'offset_linear': self.offset_linear,
+                      'score_unet': self.score_unet, 'score_outputlayer': self.score_outputlayer,
+                      'score_linear': self.score_linear}
+
+        for m in self.fix_module:
+            mod = module_map[m]
+            for param in mod.parameters():
+                param.requires_grad = False
+
+        #### load pretrain weights
+        if self.pretrain_path is not None:
+            pretrain_dict = torch.load(self.pretrain_path)
+            for m in self.pretrain_module:
+                print(
+                    "Load pretrained " + m + ": %d/%d" % utils.load_model_param(module_map[m], pretrain_dict, prefix=m))
+
+    @staticmethod
+    def set_bn_init(m):
+        classname = m.__class__.__name__
+        if classname.find('BatchNorm') != -1:
+            m.weight.data.fill_(1.0)
+            m.bias.data.fill_(0.0)
+
+    def proposal_generation(self, feats, candidate_feats, batch_offsets, candidates_batch_offsets):
+        proposal_idx = []
+        proposals_offset = []
+
+        for i in range(batch_offsets.size[0] - 1):
+            feats_batch_i = feats[batch_offsets[i]: batch_offsets[i + 1]]  # (N_i, F)
+            candidate_feats_batch_i = candidate_feats[
+                                      candidates_batch_offsets[i]: candidates_batch_offsets[i + 1]]  # (M_i, F)
+
+            relation_matrix = torch.norm(feats_batch_i.unsqueeze(1) - candidate_feats_batch_i.unsqueeze(0), dim=-1,
+                                         p=2)  # (N_i, M_i)
+            proposal_idx_i = torch.argmin(relation_matrix, dim=-1)  # (N_i) todo: merge the proposal
+            proposal_id_i, proposal_point_idx_i = torch.sort(proposal_idx_i)  # 因为pointgroup的接口需要把proposal聚集一块处理
+
+            proposal_num = torch.unique(proposal_id_i).size()[0]
+            proposals_offset_i = utils.get_batch_offsets(proposal_id_i, proposal_num)  # proposal offset (nProposal + 1)
+            proposals_offset.append(proposals_offset_i)
+
+            proposal_id_i, proposal_point_idx_i = proposal_id_i.unsqueeze(1), proposal_point_idx_i.unsqueeze(1)
+            proposal_idx_i = torch.cat((proposal_id_i, proposal_point_idx_i), dim=1)
+            proposal_idx.append(proposal_idx_i)
+
+        proposal_idx = torch.cat(proposal_idx, dim=0)
+
+        return proposal_idx, proposals_offset
+
+    def clusters_voxelization(self, clusters_idx, clusters_offset, feats, coords, fullscale, scale, mode):
+        '''
+        :param clusters_idx: (SumNPoint, 2), int, dim 0 for cluster_id, dim 1 for corresponding point idxs in N, cpu
+        :param clusters_offset: (nCluster + 1), int, cpu
+        :param feats: (N, C), float, cuda
+        :param coords: (N, 3), float, cuda
+        :return:
+        '''
+        c_idxs = clusters_idx[:, 1].cuda()
+        clusters_feats = feats[c_idxs.long()]
+        clusters_coords = coords[c_idxs.long()]
+
+        clusters_coords_mean = pointgroup_ops.sec_mean(clusters_coords, clusters_offset.cuda())  # (nCluster, 3), float
+        clusters_coords_mean = torch.index_select(clusters_coords_mean, 0,
+                                                  clusters_idx[:, 0].cuda().long())  # (sumNPoint, 3), float
+        clusters_coords -= clusters_coords_mean
+
+        clusters_coords_min = pointgroup_ops.sec_min(clusters_coords, clusters_offset.cuda())  # (nCluster, 3), float
+        clusters_coords_max = pointgroup_ops.sec_max(clusters_coords, clusters_offset.cuda())  # (nCluster, 3), float
+
+        clusters_scale = 1 / ((clusters_coords_max - clusters_coords_min) / fullscale).max(1)[
+            0] - 0.01  # (nCluster), float
+        clusters_scale = torch.clamp(clusters_scale, min=None, max=scale)
+
+        min_xyz = clusters_coords_min * clusters_scale.unsqueeze(-1)  # (nCluster, 3), float
+        max_xyz = clusters_coords_max * clusters_scale.unsqueeze(-1)
+
+        clusters_scale = torch.index_select(clusters_scale, 0, clusters_idx[:, 0].cuda().long())
+
+        clusters_coords = clusters_coords * clusters_scale.unsqueeze(-1)
+
+        range = max_xyz - min_xyz
+        offset = - min_xyz + torch.clamp(fullscale - range - 0.001, min=0) * torch.rand(3).cuda() + torch.clamp(
+            fullscale - range + 0.001, max=0) * torch.rand(3).cuda()
+        offset = torch.index_select(offset, 0, clusters_idx[:, 0].cuda().long())
+        clusters_coords += offset
+        assert clusters_coords.shape.numel() == ((clusters_coords >= 0) * (clusters_coords < fullscale)).sum()
+
+        clusters_coords = clusters_coords.long()
+        clusters_coords = torch.cat([clusters_idx[:, 0].view(-1, 1).long(), clusters_coords.cpu()],
+                                    1)  # (sumNPoint, 1 + 3)
+
+        out_coords, inp_map, out_map = pointgroup_ops.voxelization_idx(clusters_coords, int(clusters_idx[-1, 0]) + 1,
+                                                                       mode)
+        # output_coords: M * (1 + 3) long
+        # input_map: sumNPoint int
+        # output_map: M * (maxActive + 1) int
+
+        out_feats = pointgroup_ops.voxelization(clusters_feats, out_map.cuda(), mode)  # (M, C), float, cuda
+
+        spatial_shape = [fullscale] * 3
+        voxelization_feats = spconv.SparseConvTensor(out_feats, out_coords.int().cuda(), spatial_shape,
+                                                     int(clusters_idx[-1, 0]) + 1)
+
+        return voxelization_feats, inp_map
+
+    def select(self, xyz, feats, xyz_batch_cnt, candidates_batch_cnt):
+        """
 		FPS and then select top k candidate by considering feature entropy
-		:param xyz: input xyz of each points [B, N, 3]
-		:param feats: input feature of each points [B, N, F]
+		:param xyz: input xyz of each points [N, 3]
+		:param feats: input feature of each points [N, F]
 		:return: index of instance candidate points
 		"""
 
-		def cal_entropy(feats):
-			"""
-			:param feats: [B, N, F]
+        def cal_entropy(feats):
+            """
+			:param feats: [N, F]
 			:return:
 			"""
-			softmax_feat = F.softmax(feats, dim=-1)
-			feat_entropy = torch.sum(-softmax_feat * torch.log(softmax_feat), dim=-1)  # sigma{-fi * log{fi}}, [B, N]
-			return feat_entropy
+            softmax_feat = F.softmax(feats, dim=-1)
+            feat_entropy = torch.sum(-softmax_feat * torch.log(softmax_feat), dim=-1)  # sigma{-fi * log{fi}}, [B, N]
+            return feat_entropy
 
-		assert xyz.size()[1] == feats.size()[1]
-		points_num = xyz.size()[1]
+        # assert xyz.size()[1] == feats.size()[1]
+        # points_num = xyz.size()[1]
 
-		idx = pointnet2_utils.furthest_point_sample(xyz, points_num // 2)  # fps采样，返回index [B, NSample]
-		gather_feature = pointnet2_utils.gather_operation(feats.permute(0, 2, 1).contiguous(),
-														  idx).permute(0, 2, 1).contiguous()  # 根据index获取采样点
-		gather_feature = gather_feature.cpu()
+        candidate_idx = pointnet2_utils.stack_farthest_point_sample(xyz, xyz_batch_cnt,
+                                                                    candidates_batch_cnt)  # fps采样，返回index [B, NSample]
+        # candidate_idx = pointnet2_utils.furthest_point_sample(xyz, candidates_num)  # fps采样，返回index [B, NSample]
+        # idx = pointnet2_utils.furthest_point_sample(xyz, points_num // 2)  # fps采样，返回index [B, NSample]
+        # gather_feature = pointnet2_utils.gather_operation(feats.permute(0, 2, 1).contiguous(),
+        #                                                   idx).permute(0, 2, 1).contiguous()  # 根据index获取采样点
+        # gather_feature = gather_feature.cpu()
+        #
+        # feat_entropy = cal_entropy(gather_feature)
+        # sorted_idx = feat_entropy.sort(dim=-1)[1][:, :candidates_num].long()  # [B, NSample]
+        # sorted_idx = sorted_idx.to(self.device)
+        # candidate_idx = torch.gather(idx, -1, sorted_idx)
 
-		feat_entropy = cal_entropy(gather_feature)
-		sorted_idx = feat_entropy.sort(dim=-1)[1][:, :candidates_num].long()  # [B, NSample]
-		sorted_idx = sorted_idx.to(self.device)
-		candidate_idx = torch.gather(idx, -1, sorted_idx)
+        return candidate_idx
 
-		return candidate_idx
+    def forward(self, input, input_map, coords, batch_idxs, batch_offsets, epoch):
+        '''
+        :param input_map: (N), int, cuda
+        :param coords: (N, 3), float, cuda
+        :param batch_idxs: (N), int, cuda
+        :param batch_offsets: (B + 1), int, cuda
+        '''
+        ret = {}
 
-	def forward(self, xyz, feats):
-		ret = {}
-		batch_size, num_point, _ = xyz.size()
+        # backbone
+        output = self.input_conv(input)
+        output = self.unet(output)
+        output = self.output_layer(output)
+        output_feats = output.features[input_map.long()]
 
-		# backbone
-		output_feats = self.backbone(xyz, feats)  # [B, N, F]
-		ret['embedding_feats'] = output_feats
+        # semantice segmentation
+        semantic_feats = self.semantic_encoder(output_feats)
+        semantic_scores = self.semantic_linear(semantic_feats)
+        semantic_preds = semantic_scores.max(dim=-1)[1]
+        ret['semantic_scores'] = semantic_scores.view(-1, self.cfg.classes)
 
-		# semantice part
-		semantic_scores = self.semantic_linear(output_feats)  # [B, N, nclass]
-		semantic_preds = semantic_scores.max(dim=-1)[1]  # [B, N]
+        # instance-aware embedding feature encoding
+        embedding_feats = self.embedding_encoder(output_feats)
+        ret['embedding_feats'] = embedding_feats
 
-		ret['semantic_scores'] = semantic_scores.view(-1, self.cfg.classes)
+        # position encoding
+        pos_feats = self.position_encoder(output_feats)
+        ret['pos_feats'] = pos_feats
 
-		# select module
-		candidates_num = xyz.size()[
-							 1] // self.cfg.candidate_scale  # the number of candidates instance is the 1% of the origin points'
-		candidate_idx = self.select(xyz, feats, candidates_num)  # [B, Nc]
-		candidate_feats = pointnet2_utils.gather_operation(
-			output_feats.permute(0, 2, 1).contiguous(), candidate_idx
-		).permute(0, 2, 1).contiguous()  # [B, Nc, F]
+        # offset encoding
+        pt_offsets_feats = self.offset_encoder(output_feats)
+        pt_offsets = self.offset_linear(pt_offsets_feats)  # (N, 3), float32
+        ret['pt_offsets'] = pt_offsets
 
-		# relation matrix
-		relation_matrix = F.softmax(self.relation_net(output_feats, candidate_feats), dim=-1)  # [B, N, Nc]
-		proposals_idx = torch.argmax(relation_matrix, dim=-1)  # [B, N]
-		nProposal = torch.unique(proposals_idx).size()[0]
+        feats = torch.cat((semantic_feats, embedding_feats, pos_feats), dim=-1).unsqueeze(-1)
 
-		# score net
-		score = self.score_net(xyz, output_feats)  # [B, N, F']
-		score = pointnet2_utils.roipool(score, proposals_idx.int(), nProposal)  # [B, Nc, F']
-		proposal_score = self.score_linear(score)  # [B, Nc, 1]
+        coords_idx = torch.tensor(range(batch_idxs.size()[0]), device=batch_idxs.device)
 
-		ret['proposal_scores'] = (proposals_idx, proposal_score, nProposal)
+        if (epoch > self.prepare_epochs):
+            #### get prooposal clusters
+            object_idxs = torch.nonzero(semantic_preds > 1).view(-1)
 
-		return ret
+            batch_idxs_ = batch_idxs[object_idxs]
+            batch_offsets_ = utils.get_batch_offsets(batch_idxs_, input.batch_size)
+            coords_ = coords[object_idxs]
+            feats_ = feats[object_idxs]
+            coords_idx_ = coords_idx[object_idxs]
+
+            xyz_batch_cnt = torch.tensor([batch_offsets_[i] - batch_offsets_[i - 1]
+                                          for i in range(1, batch_offsets_.size()[0])],
+                                         device=batch_offsets_.device).int()  # (B,)
+
+            # assume the num_candidates for each batch are different
+            candidates_batch_cnt = xyz_batch_cnt // self.cfg.candidate_scale
+            candidates_batch_cnt = torch.clamp(candidates_batch_cnt, 10, self.cfg.max_candidate).int()
+
+            candidates_batch_offsets = torch.tensor([0] * (batch_offsets_.size[0] + 1),
+                                                    device=batch_offsets_.device).int()  # (B + 1,)
+            for i in candidates_batch_cnt.size()[0]:
+                candidates_batch_offsets[i + 1] = candidates_batch_offsets[i] + candidates_batch_cnt[i]
+
+            candidate_idx = self.select(coords_, feats_, xyz_batch_cnt, candidates_batch_cnt)  # select module
+            candidate_feats = feats_[candidate_idx]  # (M, F)
+
+            # proposal generation
+            proposals_idx, proposals_offset = self.proposal_generation(feats_, candidate_feats,
+                                                                       batch_offsets_, candidates_batch_offsets)  # [N,]
+            proposals_idx[:, 1] = object_idxs[proposals_idx[:, 1].long()].int()
+            # proposals_idx: (sumNPoint, 2), int, dim 0 for cluster_id, dim 1 for corresponding point idxs in N
+            # proposals_offset: (nProposal + 1), int
+
+            #### proposals voxelization again
+            input_feats, inp_map = self.clusters_voxelization(proposals_idx, proposals_offset, feats, coords,
+                                                              self.score_fullscale, self.score_scale, self.mode)
+
+            #### score
+            score = self.score_unet(input_feats)
+            score = self.score_outputlayer(score)
+            score_feats = score.features[inp_map.long()]  # (sumNPoint, C)
+            score_feats = pointgroup_ops.roipool(score_feats, proposals_offset.cuda())  # (nProposal, C)
+            scores = self.score_linear(score_feats)  # (nProposal, 1)
+
+            ret['proposal_scores'] = (scores, proposals_idx, proposals_offset)
+
+        return ret
 
 
 def model_fn_decorator(test=False):
-	from util.config import cfg
+    from util.config import cfg
 
-	semantic_criterion = nn.CrossEntropyLoss(ignore_index=cfg.ignore_label).to(cfg.device)
-	score_criterion = nn.BCELoss(reduction='none').to(cfg.device)
+    semantic_criterion = nn.CrossEntropyLoss(ignore_index=cfg.ignore_label).to(cfg.device)
+    score_criterion = nn.BCELoss(reduction='none').to(cfg.device)
 
-	def test_model_fn(batch, model, epoch):
-		pass
+    def test_model_fn(batch, model, epoch):
+        pass
 
-	def train_model_fn(batch, model, epoch):
-		'''
-		:param batch: input batch, contains point coordinate, feature(rgb, normal, etc), seg_label, ins_label
-		:param model: model to process the data
-		:param epoch: retain
-		:return: loss: the total loss
-		'''
+    def train_model_fn(batch, model, epoch):
+        ##### prepare input and forward
+        # batch {'locs': locs, 'voxel_locs': voxel_locs, 'p2v_map': p2v_map, 'v2p_map': v2p_map,
+        # 'locs_float': locs_float, 'feats': feats, 'labels': labels, 'instance_labels': instance_labels,
+        # 'instance_info': instance_infos, 'instance_pointnum': instance_pointnum,
+        # 'id': tbl, 'offsets': batch_offsets, 'spatial_shape': spatial_shape}
+        coords = batch['locs'].cuda()  # (N, 1 + 3), long, cuda, dimension 0 for batch_idx
+        voxel_coords = batch['voxel_locs'].cuda()  # (M, 1 + 3), long, cuda
+        p2v_map = batch['p2v_map'].cuda()  # (N), int, cuda
+        v2p_map = batch['v2p_map'].cuda()  # (M, 1 + maxActive), int, cuda
 
-		# unpack batch data										in case B = 1
-		xyz = batch['locs_float'].to(cfg.device)  # [B, N, 3] point coordinate
-		feats = batch['feats'].to(cfg.device)  # [B, N, 3] color
-		seg_labels = batch['labels'].to(cfg.device)  # [B, N] segmentation label
-		ins_labels = batch['instance_labels'].to(cfg.device)  # [B, N] instance label
-		instance_num = batch['instance_num'].to(cfg.device)  # [B,] number of instance for each batch
-		print('xyz size:', xyz.size(), 'instance_num:', instance_num)
+        coords_float = batch['locs_float'].cuda()  # (N, 3), float32, cuda
+        feats = batch['feats'].cuda()  # (N, C), float32, cuda
+        labels = batch['labels'].cuda()  # (N), long, cuda
+        instance_labels = batch['instance_labels'].cuda()  # (N), long, cuda, 0~total_nInst, -100
 
-		# get and unpack model result
-		ret = model(xyz, feats)
+        instance_info = batch['instance_info'].cuda()  # (N, 9), float32, cuda, (meanxyz, minxyz, maxxyz)
+        instance_pointnum = batch['instance_pointnum'].cuda()  # (total_nInst), int, cuda
 
-		embedding_feats = ret['embedding_feats']  # [B, N, F] embedding feats for calculating the embedding loss
-		semantic_scores = ret['semantic_scores']  # [B, nclass, N]
-		proposals_idx, proposal_scores, proposals_num = ret['proposal_scores']  # [B, Nc, 1]
+        batch_offsets = batch['offsets'].cuda()  # (B + 1), int, cuda
 
-		# for loss calculation
-		loss_items = {}
-		loss_items['embedding_feats'] = embedding_feats
-		loss_items['semantic_scores'] = (semantic_scores, seg_labels)
-		loss_items['proposal_scores'] = (proposals_idx, proposal_scores, proposals_num, ins_labels, instance_num)
+        spatial_shape = batch['spatial_shape']
 
-		loss, loss_out = loss_fn(loss_items)
+        if cfg.use_coords:
+            feats = torch.cat((feats, coords_float), 1)
+        voxel_feats = pointgroup_ops.voxelization(feats, v2p_map, cfg.mode)  # (M, C), float, cuda
 
-		return loss
+        input_ = spconv.SparseConvTensor(voxel_feats, voxel_coords.int(), spatial_shape, cfg.batch_size)
 
-	def loss_fn(loss_item):
-		'''
-		:param loss_item: contain the items needed for calculating the losses
-		:return:
-		'''
-		loss_out = {}
-		## semantic loss
-		semantic_scores, seg_labels = loss_item['semantic_scores']
-		semantic_loss = semantic_criterion(semantic_scores, seg_labels.view(-1))
-		loss_out['semantic_loss'] = semantic_loss
+        # get and unpack model result
+        ret = model(input_, p2v_map, coords_float, coords[:, 0].int(), batch_offsets, epoch)
 
-		## score loss
-		proposals_idx, proposal_scores, proposals_num, ins_labels, instance_num = loss_item['proposal_scores']
-		score_loss = 0
-		if instance_num > 0:  # in case some scenes don't contain instance
-			# get iou
-			ious = pointnet2_utils.get_iou(proposals_idx.int(), proposals_num, ins_labels.int(),
-										   instance_num)  # [B, nProposal, nInstance]
-			gt_ious, _ = ious.max(dim=-1)  # [B, nProposal]
+        embedding_feats = ret['embedding_feats']  # [B, N, F] embedding feats for calculating the embedding loss
+        semantic_scores = ret['semantic_scores']  # [N, nclass]
+        pt_offsets = ret['pt_offsets']  # (N, 3), float32, cuda
+        if (epoch > cfg.prepare_epochs):
+            scores, proposals_idx, proposals_offset = ret['proposal_scores']
+            # scores: (nProposal, 1) float, cuda
+            # proposals_idx: (sumNPoint, 2), int, cpu, dim 0 for cluster_id, dim 1 for corresponding point idxs in N
+            # proposals_offset: (nProposal + 1), int, cpu
 
-			# convert iou to binary gt
-			mask_low = gt_ious < cfg.bg_thresh  # ious < low threshold
-			mask_mid = (gt_ious >= cfg.bg_thresh) & (
-						gt_ious <= cfg.fg_thresh)  # low threshold <= ious <= high threshold
-			mask_high = gt_ious > cfg.fg_thresh  # ious > high threshold
+        loss_inp = {}
+        loss_inp['semantic_scores'] = (semantic_scores, labels)
+        loss_inp['embedding_feats'] = embedding_feats
+        loss_inp['pt_offsets'] = (pt_offsets, coords_float, instance_info, instance_labels)
+        if (epoch > cfg.prepare_epochs):
+            loss_inp['proposal_scores'] = (scores, proposals_idx, proposals_offset, instance_pointnum)
 
-			gt_score1 = torch.zeros_like(mask_low).float()
+        loss, loss_out, infos = loss_fn(loss_inp, epoch)
 
-			k = torch.ones_like(gt_ious) * (1 / (cfg.fg_thresh - cfg.bg_thresh))
-			b = torch.ones_like(gt_ious) * (cfg.bg_thresh / (cfg.bg_thresh - cfg.fg_thresh))
-			gt_score2 = torch.where(mask_mid, gt_ious * torch.ones_like(gt_ious) * k + b, torch.zeros_like(gt_ious))
+        ##### accuracy / visual_dict / meter_dict
+        with torch.no_grad():
+            preds = {}
+            preds['semantic'] = semantic_scores
+            preds['pt_offsets'] = pt_offsets
+            if (epoch > cfg.prepare_epochs):
+                preds['score'] = scores
+                preds['proposals'] = (proposals_idx, proposals_offset)
 
-			gt_score3 = torch.where(mask_high, torch.ones_like(gt_ious), torch.zeros_like(gt_ious))
+            visual_dict = {}
+            visual_dict['loss'] = loss
+            for k, v in loss_out.items():
+                visual_dict[k] = v[0]
 
-			gt_scores = gt_score1 + gt_score2 + gt_score3  # [B, nProposal]
+            meter_dict = {}
+            meter_dict['loss'] = (loss.item(), coords.shape[0])
+            for k, v in loss_out.items():
+                meter_dict[k] = (float(v[0]), v[1])
 
-			score_loss = score_criterion(torch.sigmoid(proposal_scores).view(-1), gt_scores.view(-1))
-			score_loss = score_loss.mean()
-		loss_out['score_loss'] = score_loss
+        return loss, preds, visual_dict, meter_dict
 
-		## embedding loss
-		embedding_feats = loss_item['embedding_feats']  # [B, N, F]
+    def loss_fn(loss_inp, epoch):
 
-		# pull loss			in only case 1 batch
-		pull_loss = 0.0
-		for i in range(instance_num[0]):
-			instance_feats_i = embedding_feats[ins_labels == i]  # [instance_i_pnum, F]
-			instance_pnum_i = instance_feats_i.size()[0]
-			mu_feat_i = torch.sum(instance_feats_i, dim=0) / instance_pnum_i  # [F] average feature of the ith instance
+        loss_out = {}
+        infos = {}
 
-			difference_i = instance_feats_i - mu_feat_i  # [instance_i_pnum, F]
-			distance_i = torch.sum(difference_i ** 2, dim=-1)  # [instance_i_pnum]
-			pull_loss_i = distance_i - cfg.sigma_1
-			pull_loss_i = torch.where(pull_loss_i >= 0, pull_loss_i,
-									  torch.zeros_like(pull_loss_i))  # max(0, ||mu - fi||2 - sigma1)
-			pull_loss_i = torch.sum(pull_loss_i) / instance_pnum_i
+        '''semantic loss'''
+        semantic_scores, semantic_labels = loss_inp['semantic_scores']
+        # semantic_scores: (N, nClass), float32, cuda
+        # semantic_labels: (N), long, cuda
 
-			pull_loss += pull_loss_i
-		pull_loss /= instance_num[0]
+        semantic_loss = semantic_criterion(semantic_scores, semantic_labels)
+        loss_out['semantic_loss'] = (semantic_loss, semantic_scores.shape[0])
 
-		# push loss
-		push_loss = 0.0
-		for i in range(instance_num[0]):
-			for j in range(instance_num[0]):
-				if i != j:
-					instance_feats_i = embedding_feats[ins_labels == i]  # [instance_i_pnum, F]
-					instance_feats_j = embedding_feats[ins_labels == j]  # [instance_j_pnum, F]
+        '''offset loss'''
+        pt_offsets, coords, instance_info, instance_labels = loss_inp['pt_offsets']
+        # pt_offsets: (N, 3), float, cuda
+        # coords: (N, 3), float32
+        # instance_info: (N, 9), float32 tensor (meanxyz, minxyz, maxxyz)
+        # instance_labels: (N), long
 
-					mu_feat_i = torch.sum(instance_feats_i, dim=0) / instance_feats_i.size()[0]
-					mu_feat_j = torch.sum(instance_feats_j, dim=0) / instance_feats_j.size()[0]
+        gt_offsets = instance_info[:, 0:3] - coords  # (N, 3)
+        pt_diff = pt_offsets - gt_offsets  # (N, 3)
+        pt_dist = torch.sum(torch.abs(pt_diff), dim=-1)  # (N)
+        valid = (instance_labels != cfg.ignore_label).float()
+        offset_norm_loss = torch.sum(pt_dist * valid) / (torch.sum(valid) + 1e-6)
 
-					difference_ij = mu_feat_i - mu_feat_j
-					distance_ij = torch.sum(difference_ij ** 2)
-					push_loss_ij = max(distance_ij, 0)
-					push_loss += push_loss_ij
-		push_loss /= (instance_num[0] * (instance_num[0] - 1))
+        gt_offsets_norm = torch.norm(gt_offsets, p=2, dim=1)  # (N), float
+        gt_offsets_ = gt_offsets / (gt_offsets_norm.unsqueeze(-1) + 1e-8)
+        pt_offsets_norm = torch.norm(pt_offsets, p=2, dim=1)
+        pt_offsets_ = pt_offsets / (pt_offsets_norm.unsqueeze(-1) + 1e-8)
+        direction_diff = - (gt_offsets_ * pt_offsets_).sum(-1)  # (N)
+        offset_dir_loss = torch.sum(direction_diff * valid) / (torch.sum(valid) + 1e-6)
 
-		embedding_loss = pull_loss + push_loss
+        loss_out['offset_norm_loss'] = (offset_norm_loss, valid.sum())
+        loss_out['offset_dir_loss'] = (offset_dir_loss, valid.sum())
 
-		loss_out['embedding_loss'] = embedding_loss
+        '''discriminative loss'''
+        embedding_feats = loss_inp['embedding_feats']
+        # embedding_feats: (B, N, F)
 
-		## total loss
-		loss = semantic_loss + score_loss + embedding_loss
+        instance_labels_unique = torch.unique(instance_labels)
+        instance_labels_unique = instance_labels_unique[instance_labels_unique != cfg.ignore_label]
+        instance_num = instance_labels_unique.size()[0]
 
-		return loss, loss_out
+        # pull loss
+        pull_loss = 0.0
+        mu_feats = []  # the mean feature for a specific instance
+        for i in instance_labels_unique:
+            instance_feats_i = embedding_feats[instance_labels == i]  # [instance_i_pnum, F]
 
-	if test:
-		fn = test_model_fn
-	else:
-		fn = train_model_fn
-	return fn
+            mu_feat_i = torch.mean(instance_feats_i, dim=0)  # [F,]
+            mu_feats.append(mu_feat_i)
+
+            pull_loss_i = torch.norm(instance_feats_i - mu_feat_i, dim=-1, p=2) - cfg.sigma_1
+            pull_loss_i = torch.where(pull_loss_i >= 0, pull_loss_i,
+                                      torch.zeros_like(pull_loss_i)) ** 2  # max(0, ||mu - fi||2 - sigma1)^2
+            pull_loss += torch.mean(pull_loss_i)
+        pull_loss /= instance_num
+
+        loss_out['pull_loss'] = (pull_loss, instance_num)
+
+        # push loss
+        push_loss = 0.0
+        for i, feat_i in enumerate(instance_labels_unique):
+            for j, feat_j in enumerate(instance_labels_unique):
+                if i != j:
+                    mu_feat_i = mu_feats[i]
+                    mu_feat_j = mu_feats[j]
+
+                    push_loss_ij = max(cfg.sigma_2 - torch.norm(mu_feat_i - mu_feat_j, dim=-1, p=2), 0) ** 2
+                    push_loss += push_loss_ij
+        push_loss /= (instance_num * (instance_num - 1))
+
+        loss_out['push_loss'] = (push_loss, instance_num * (instance_num - 1))
+
+        # reg loss
+        reg_loss = 0.0
+        for mu_feat in mu_feats:
+            reg_loss += torch.norm(mu_feat, dim=-1, p=2)
+        reg_loss /= instance_num
+
+        loss_out['reg_loss'] = (reg_loss, instance_num)
+
+        embedding_loss = cfg.weight_pull * pull_loss + cfg.weight_push * push_loss + cfg.weight_reg * reg_loss
+
+        loss_out['embedding_loss'] = (embedding_loss, instance_num)
+
+        if (epoch > cfg.prepare_epochs):
+            '''score loss'''
+            scores, proposals_idx, proposals_offset, instance_pointnum = loss_inp['proposal_scores']
+            # scores: (nProposal, 1), float32
+            # proposals_idx: (sumNPoint, 2), int, cpu, dim 0 for cluster_id, dim 1 for corresponding point idxs in N
+            # proposals_offset: (nProposal + 1), int, cpu
+            # instance_pointnum: (total_nInst), int
+
+            ious = pointgroup_ops.get_iou(proposals_idx[:, 1].cuda(), proposals_offset.cuda(), instance_labels,
+                                          instance_pointnum)  # (nProposal, nInstance), float
+            gt_ious, gt_instance_idxs = ious.max(1)  # (nProposal) float, long
+            gt_scores = get_segmented_scores(gt_ious, cfg.fg_thresh, cfg.bg_thresh)
+
+            score_loss = score_criterion(torch.sigmoid(scores.view(-1)), gt_scores)
+            score_loss = score_loss.mean()
+
+            loss_out['score_loss'] = (score_loss, gt_ious.shape[0])
+
+        ## total loss
+        loss = semantic_loss + embedding_loss
+        if epoch > cfg.prepare_epochs:
+            loss += score_loss
+
+        return loss, loss_out, infos
+
+    def get_segmented_scores(scores, fg_thresh=1.0, bg_thresh=0.0):
+        '''
+        :param scores: (N), float, 0~1
+        :return: segmented_scores: (N), float 0~1, >fg_thresh: 1, <bg_thresh: 0, mid: linear
+        '''
+        fg_mask = scores > fg_thresh
+        bg_mask = scores < bg_thresh
+        interval_mask = (fg_mask == 0) & (bg_mask == 0)
+
+        segmented_scores = (fg_mask > 0).float()
+        k = 1 / (fg_thresh - bg_thresh)
+        b = bg_thresh / (bg_thresh - fg_thresh)
+        segmented_scores[interval_mask] = scores[interval_mask] * k + b
+
+        return segmented_scores
+
+    if test:
+        fn = test_model_fn
+    else:
+        fn = train_model_fn
+    return fn
 
 
 if __name__ == '__main__':
-	# for test roi pooling
-	# [2, 3, 4]
-	# feats = torch.tensor([[[1, 2, 3, 4], [2, 3, 4, 1], [3, 1, 5, 10]], [[1, 2, 3, 4], [2, 3, 4, 1], [3, 1, 5, 10]]]).float()
-	# feats.requires_grad_(True)
-	# feats = feats.cuda()
-	# # [2, 3]
-	# inst_label = torch.tensor([[0, 1, 1], [0, 0, 1]]).int()
-	# inst_label = inst_label.cuda()
-	feats = torch.rand((1, 8000, 32), requires_grad=True).cuda()
-	inst_label = torch.zeros((1, 8000)).int().cuda()
-	inst_label[:, :3000] = 1
-	print(feats.size(), inst_label.size())
-	res = pointnet2_utils.roipool(feats, inst_label, 2)
-	print(res.size(), res)
+    # for test roi pooling
+    # [2, 3, 4]
+    # feats = torch.tensor([[[1, 2, 3, 4], [2, 3, 4, 1], [3, 1, 5, 10]], [[1, 2, 3, 4], [2, 3, 4, 1], [3, 1, 5, 10]]]).float()
+    # feats.requires_grad_(True)
+    # feats = feats.cuda()
+    # # [2, 3]
+    # inst_label = torch.tensor([[0, 1, 1], [0, 0, 1]]).int()
+    # inst_label = inst_label.cuda()
+    feats = torch.rand((1, 8000, 32), requires_grad=True).cuda()
+    inst_label = torch.zeros((1, 8000)).int().cuda()
+    inst_label[:, :3000] = 1
+    print(feats.size(), inst_label.size())
+    res = pointnet2_utils.roipool(feats, inst_label, 2)
+    print(res.size(), res)
 # out = torch.mean(res)
 # torch.autograd.backward(out)
 # print(res.size(), res, res.grad)

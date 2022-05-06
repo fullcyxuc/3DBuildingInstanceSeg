@@ -1,0 +1,13 @@
+/exp/
+/.idea/
+/lib/OP/pointnet2.egg-info/
+/lib/OP/dist/
+/lib/OP/build/
+/lib/pointgroup_ops/build/
+/lib/pointgroup_ops/PG_OP.egg-info/
+/lib/pointgroup_ops/PG_OP.cpython-36m-x86_64-linux-gnu.so
+/module_test.py
+/pcdet.egg-info/
+/lib/pcdet/build/
+/lib/pcdet/pcdet.egg-info/
+/lib/pcdet/dist/

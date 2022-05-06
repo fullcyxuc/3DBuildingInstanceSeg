@@ -1,7 +1,6 @@
 '''
-modified from
-    PointGroup train.py
-    Written by Li Jiang
+PointGroup train.py
+Written by Li Jiang
 '''
 
 import torch
@@ -44,9 +43,7 @@ def train_epoch(train_loader, model, model_fn, optimizer, epoch):
     model.train()
     start_epoch = time.time()
     end = time.time()
-    print(len(train_loader))
     for i, batch in enumerate(train_loader):
-        print(i)
         data_time.update(time.time() - end)
         torch.cuda.empty_cache()
 
@@ -54,14 +51,13 @@ def train_epoch(train_loader, model, model_fn, optimizer, epoch):
         utils.step_learning_rate(optimizer, cfg.lr, epoch - 1, cfg.step_epoch, cfg.multiplier)
 
         ##### prepare input and forward
-        # loss, _, visual_dict, meter_dict = model_fn(batch, model, epoch)
-        loss = model_fn(batch, model, epoch)
+        loss, _, visual_dict, meter_dict = model_fn(batch, model, epoch)
 
-        # ##### meter_dict
-        # for k, v in meter_dict.items():
-        #     if k not in am_dict.keys():
-        #         am_dict[k] = utils.AverageMeter()
-        #     am_dict[k].update(v[0], v[1])
+        ##### meter_dict
+        for k, v in meter_dict.items():
+            if k not in am_dict.keys():
+                am_dict[k] = utils.AverageMeter()
+            am_dict[k].update(v[0], v[1])
 
         ##### backward
         optimizer.zero_grad()
@@ -81,20 +77,20 @@ def train_epoch(train_loader, model, model_fn, optimizer, epoch):
         t_h, t_m = divmod(t_m, 60)
         remain_time = '{:02d}:{:02d}:{:02d}'.format(int(t_h), int(t_m), int(t_s))
 
-        # sys.stdout.write(
-        #     "epoch: {}/{} iter: {}/{} loss: {:.4f}({:.4f}) data_time: {:.2f}({:.2f}) iter_time: {:.2f}({:.2f}) remain_time: {remain_time}\n".format
-        #     (epoch, cfg.epochs, i + 1, len(train_loader), am_dict['loss'].val, am_dict['loss'].avg,
-        #      data_time.val, data_time.avg, iter_time.val, iter_time.avg, remain_time=remain_time))
-        # if (i == len(train_loader) - 1): print()
+        sys.stdout.write(
+            "epoch: {}/{} iter: {}/{} loss: {:.4f}({:.4f}) data_time: {:.2f}({:.2f}) iter_time: {:.2f}({:.2f}) remain_time: {remain_time}\n".format
+            (epoch, cfg.epochs, i + 1, len(train_loader), am_dict['loss'].val, am_dict['loss'].avg,
+             data_time.val, data_time.avg, iter_time.val, iter_time.avg, remain_time=remain_time))
+        if (i == len(train_loader) - 1): print()
+
 
     logger.info("epoch: {}/{}, train loss: {:.4f}, time: {}s".format(epoch, cfg.epochs, am_dict['loss'].avg, time.time() - start_epoch))
 
-    if epoch % 20 == 0:
-        utils.checkpoint_save(model, cfg.exp_path, cfg.config.split('/')[-1][:-5], epoch, cfg.save_freq, use_cuda)
+    utils.checkpoint_save(model, cfg.exp_path, cfg.config.split('/')[-1][:-5], epoch, cfg.save_freq, use_cuda)
 
-    # for k in am_dict.keys():
-    #     if k in visual_dict.keys():
-    #         writer.add_scalar(k+'_train', am_dict[k].avg, epoch)
+    for k in am_dict.keys():
+        if k in visual_dict.keys():
+            writer.add_scalar(k+'_train', am_dict[k].avg, epoch)
 
 
 def eval_epoch(val_loader, model, model_fn, epoch):
@@ -107,14 +103,13 @@ def eval_epoch(val_loader, model, model_fn, epoch):
         for i, batch in enumerate(val_loader):
 
             ##### prepare input and forward
-            # loss, preds, visual_dict, meter_dict = model_fn(batch, model, epoch)
-            loss = model_fn(batch, model, epoch)
+            loss, preds, visual_dict, meter_dict = model_fn(batch, model, epoch)
 
-            # ##### meter_dict
-            # for k, v in meter_dict.items():
-            #     if k not in am_dict.keys():
-            #         am_dict[k] = utils.AverageMeter()
-            #     am_dict[k].update(v[0], v[1])
+            ##### meter_dict
+            for k, v in meter_dict.items():
+                if k not in am_dict.keys():
+                    am_dict[k] = utils.AverageMeter()
+                am_dict[k].update(v[0], v[1])
 
             ##### print
             sys.stdout.write("\riter: {}/{} loss: {:.4f}({:.4f})".format(i + 1, len(val_loader), am_dict['loss'].val, am_dict['loss'].avg))
@@ -122,9 +117,9 @@ def eval_epoch(val_loader, model, model_fn, epoch):
 
         logger.info("epoch: {}/{}, val loss: {:.4f}, time: {}s".format(epoch, cfg.epochs, am_dict['loss'].avg, time.time() - start_epoch))
 
-        # for k in am_dict.keys():
-        #     if k in visual_dict.keys():
-        #         writer.add_scalar(k + '_eval', am_dict[k].avg, epoch)
+        for k in am_dict.keys():
+            if k in visual_dict.keys():
+                writer.add_scalar(k + '_eval', am_dict[k].avg, epoch)
 
 
 if __name__ == '__main__':
@@ -139,7 +134,7 @@ if __name__ == '__main__':
     ##### model
     logger.info('=> creating model ...')
 
-    if model_name == 'InsSegNet':
+    if model_name == 'pointgroup':
         from Model.model import InstanceSegPipline as Network
         from Model.model import model_fn_decorator
     else:
@@ -168,8 +163,8 @@ if __name__ == '__main__':
     ##### dataset
     if cfg.dataset == 'scannetv2':
         if data_name == 'scannet':
-            from Dataset.scannetv2 import scannetv2_inst
-            dataset = scannetv2_inst.Dataset()
+            import data.scannetv2_inst
+            dataset = data.scannetv2_inst.Dataset()
             dataset.trainLoader()
             dataset.valLoader()
         else:
@@ -182,5 +177,6 @@ if __name__ == '__main__':
     ##### train and val
     for epoch in range(start_epoch, cfg.epochs + 1):
         train_epoch(dataset.train_data_loader, model, model_fn, optimizer, epoch)
+
         if utils.is_multiple(epoch, cfg.save_freq) or utils.is_power2(epoch):
             eval_epoch(dataset.val_data_loader, model, model_fn, epoch)
