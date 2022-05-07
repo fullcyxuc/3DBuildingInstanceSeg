@@ -31,6 +31,8 @@ conda install -c bioconda google-sparsehash
 
 **Note:** it was modify `spconv\spconv\functional.py` to make `grad_output` contiguous. Make sure you use the modified `spconv`.
 
+* First please download the [spconv](https://github.com/traveller59/spconv), and put it into lib directory
+
 * To compile `spconv`, firstly install the dependent libraries. 
 ```
 conda install libboost
@@ -51,9 +53,9 @@ python setup.py bdist_wheel
 
 
 
-(4) Compile the `OP` library.
+(4) We also use other cuda and cpp extension([pointgroup_ops](https://github.com/dvlab-research/PointGroup/tree/master/lib/pointgroup_ops),[pcdet_ops](https://github.com/yifanzhang713/IA-SSD/tree/main/pcdet/ops)), and put them into the lib, to compile them:
 ```
-cd lib/OP
+cd lib/**  # (** refer to a specific extension)
 python setup.py develop
 ```
 
@@ -62,9 +64,5 @@ python setup.py develop
 
 
 ## Acknowledgement
-This repo is built upon several repos, e.g., [Pointgroup](https://github.com/dvlab-research/PointGroup.gitCloning) [SparseConvNet](https://github.com/facebookresearch/SparseConvNet), [spconv](https://github.com/traveller59/spconv) and [STPLS3D](https://github.com/meidachen/STPLS3D.git). 
-
-## Contact
-If you have any questions or suggestions about this repo, please feel free to contact me (lijiang@cse.cuhk.edu.hk).
-
+This repo is built upon several repos, e.g., [Pointgroup](https://github.com/dvlab-research/PointGroup.gitCloning) [SparseConvNet](https://github.com/facebookresearch/SparseConvNet), [spconv](https://github.com/traveller59/spconv), [IA-SSD](https://github.com/yifanzhang713/IA-SSD/tree/main/pcdet/ops) and [STPLS3D](https://github.com/meidachen/STPLS3D.git). 
 
