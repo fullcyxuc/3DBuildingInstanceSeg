@@ -144,6 +144,7 @@ class InstanceSegPipline(nn.Module):
         block_reps = cfg.block_reps
         block_residual = cfg.block_residual
 
+        self.cfg = cfg
         self.prepare_epochs = cfg.prepare_epochs
 
         self.pretrain_path = cfg.pretrain_path
@@ -162,7 +163,7 @@ class InstanceSegPipline(nn.Module):
 
         #### backbone
         self.input_conv = spconv.SparseSequential(
-            spconv.SubMConv3d(input_c, self.m, kernel_size=3, padding=1, bias=False, indice_key='subm1')
+            spconv.SubMConv3d(input_c, m, kernel_size=3, padding=1, bias=False, indice_key='subm1')
         )
 
         self.unet = UBlock([m, 2 * m, 3 * m, 4 * m, 5 * m, 6 * m, 7 * m], norm_fn, block_reps, block,
@@ -328,17 +329,17 @@ class InstanceSegPipline(nn.Module):
 
     def select(self, xyz, feats, xyz_batch_cnt, candidates_batch_cnt):
         """
-		FPS and then select top k candidate by considering feature entropy
-		:param xyz: input xyz of each points [N, 3]
-		:param feats: input feature of each points [N, F]
-		:return: index of instance candidate points
-		"""
+        FPS and then select top k candidate by considering feature entropy
+        :param xyz: input xyz of each points [N, 3]
+        :param feats: input feature of each points [N, F]
+        :return: index of instance candidate points
+        """
 
         def cal_entropy(feats):
             """
-			:param feats: [N, F]
-			:return:
-			"""
+            :param feats: [N, F]
+            :return:
+            """
             softmax_feat = F.softmax(feats, dim=-1)
             feat_entropy = torch.sum(-softmax_feat * torch.log(softmax_feat), dim=-1)  # sigma{-fi * log{fi}}, [B, N]
             return feat_entropy
@@ -380,14 +381,14 @@ class InstanceSegPipline(nn.Module):
         semantic_feats = self.semantic_encoder(output_feats)
         semantic_scores = self.semantic_linear(semantic_feats)
         semantic_preds = semantic_scores.max(dim=-1)[1]
-        ret['semantic_scores'] = semantic_scores.view(-1, self.cfg.classes)
+        ret['semantic_scores'] = semantic_scores
 
         # instance-aware embedding feature encoding
         embedding_feats = self.embedding_encoder(output_feats)
         ret['embedding_feats'] = embedding_feats
 
         # position encoding
-        pos_feats = self.position_encoder(output_feats)
+        pos_feats = self.position_encoder(coords)
         ret['pos_feats'] = pos_feats
 
         # offset encoding
@@ -505,7 +506,19 @@ def model_fn_decorator(test=False):
         if (epoch > cfg.prepare_epochs):
             loss_inp['proposal_scores'] = (scores, proposals_idx, proposals_offset, instance_pointnum)
 
-        loss, loss_out, infos = loss_fn(loss_inp, epoch)
+        try:
+            loss, loss_out, infos = loss_fn(loss_inp, epoch)
+        except:
+            xyz = coords_float.cpu().detach().numpy()
+            feats = (feats.cpu().detach().numpy() + 1) * 127.5
+
+            out = np.concatenate((xyz, feats), axis=-1)
+
+            np.savetxt("error_points.txt", out, fmt="%.4f")
+
+
+
+
 
         ##### accuracy / visual_dict / meter_dict
         with torch.no_grad():
@@ -634,7 +647,8 @@ def model_fn_decorator(test=False):
             loss_out['score_loss'] = (score_loss, gt_ious.shape[0])
 
         ## total loss
-        loss = semantic_loss + embedding_loss
+        loss = semantic_loss + embedding_loss + offset_norm_loss + offset_dir_loss
+
         if epoch > cfg.prepare_epochs:
             loss += score_loss
 

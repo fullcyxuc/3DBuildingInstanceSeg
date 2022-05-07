@@ -77,10 +77,11 @@ def train_epoch(train_loader, model, model_fn, optimizer, epoch):
         t_h, t_m = divmod(t_m, 60)
         remain_time = '{:02d}:{:02d}:{:02d}'.format(int(t_h), int(t_m), int(t_s))
 
-        sys.stdout.write(
-            "epoch: {}/{} iter: {}/{} loss: {:.4f}({:.4f}) data_time: {:.2f}({:.2f}) iter_time: {:.2f}({:.2f}) remain_time: {remain_time}\n".format
-            (epoch, cfg.epochs, i + 1, len(train_loader), am_dict['loss'].val, am_dict['loss'].avg,
-             data_time.val, data_time.avg, iter_time.val, iter_time.avg, remain_time=remain_time))
+        if i % 50 == 0 or i == len(train_loader) - 1:
+            sys.stdout.write(
+                "epoch: {}/{} iter: {}/{} loss: {:.4f}({:.4f}) data_time: {:.2f}({:.2f}) iter_time: {:.2f}({:.2f}) remain_time: {remain_time}\n".format
+                (epoch, cfg.epochs, i + 1, len(train_loader), am_dict['loss'].val, am_dict['loss'].avg,
+                 data_time.val, data_time.avg, iter_time.val, iter_time.avg, remain_time=remain_time))
         if (i == len(train_loader) - 1): print()
 
 
@@ -112,7 +113,11 @@ def eval_epoch(val_loader, model, model_fn, epoch):
                 am_dict[k].update(v[0], v[1])
 
             ##### print
-            sys.stdout.write("\riter: {}/{} loss: {:.4f}({:.4f})".format(i + 1, len(val_loader), am_dict['loss'].val, am_dict['loss'].avg))
+            if i % 40 == 0 or i == len(val_loader) - 1:
+                sys.stdout.write(
+                    "\riter: {}/{} loss: {:.4f}({:.4f})".format(i + 1, len(val_loader), am_dict['loss'].val,
+                                                                am_dict['loss'].avg))
+
             if (i == len(val_loader) - 1): print()
 
         logger.info("epoch: {}/{}, val loss: {:.4f}, time: {}s".format(epoch, cfg.epochs, am_dict['loss'].avg, time.time() - start_epoch))
@@ -134,7 +139,7 @@ if __name__ == '__main__':
     ##### model
     logger.info('=> creating model ...')
 
-    if model_name == 'pointgroup':
+    if model_name == 'InsSegNet':
         from Model.model import InstanceSegPipline as Network
         from Model.model import model_fn_decorator
     else:
@@ -161,10 +166,10 @@ if __name__ == '__main__':
     model_fn = model_fn_decorator()
 
     ##### dataset
-    if cfg.dataset == 'scannetv2':
-        if data_name == 'scannet':
-            import data.scannetv2_inst
-            dataset = data.scannetv2_inst.Dataset()
+    if cfg.dataset == 'subsampling0.4':
+        if data_name == 'urbanscene':
+            from Dataset.urbanscene import urbanscene_inst
+            dataset = urbanscene_inst.Dataset()
             dataset.trainLoader()
             dataset.valLoader()
         else:

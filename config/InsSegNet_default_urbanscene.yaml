@@ -2,7 +2,7 @@ GENERAL:
   task: train  # train, test
   manual_seed: 123
   model_dir: Model/model.py
-  dataset_dir: data/scannetv2_inst.py
+  dataset_dir: Dataset/urbanscene/urbanscene_inst.py
   device: "cuda"
 
 DATA:
@@ -17,10 +17,10 @@ DATA:
   scale: 2.5   # voxel_size = 1 / scale, scale 50(2cm) Deprecated
   batch_size: 1
   full_scale: [128, 512]  # Deprecated
-  max_npoint: 60000
+  max_npoint: 600000
   mode: 4 # 4=mean
 
-  candidate_scale: 10000  # 1 / scale, 1 candidate for every 200 points
+  candidate_scale: 3000  # 1 / scale, 1 candidate for every 200 points
   max_candidate: 150
 
 STRUCTURE:
@@ -43,7 +43,7 @@ TRAIN:
   multiplier: 0.5
   momentum: 0.9
   weight_decay: 0.0001
-  save_freq: 16  # also eval_freq
+  save_freq: 12  # also eval_freq
   loss_weight: [1.0, 1.0, 1.0, 1.0] # semantic_loss, offset_norm_loss, offset_dir_loss, score_loss
 
   fg_thresh: 0.75

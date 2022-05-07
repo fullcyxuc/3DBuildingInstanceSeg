@@ -1,4 +1,4 @@
-import os, sys, glob, math, numpy as np
+import os, sys, glob, math, numpy as np, pandas as pd
 import scipy.ndimage
 import scipy.interpolate
 import torch
@@ -47,7 +47,8 @@ class Dataset:
         else:
             raise Exception
 
-        self.train_files = [torch.load(i) for i in train_file_names]
+        self.train_files = [pd.read_csv(i, delimiter=' ').to_numpy().astype(np.float32) for i in train_file_names]
+        # self.train_files = [torch.load(i) for i in train_file_names]
 
         logger.info('Training samples: {}'.format(len(self.train_files)))
 
@@ -81,7 +82,8 @@ class Dataset:
     def valLoader(self):
         val_file_names = sorted(
             glob.glob(os.path.join(self.data_root, self.dataset, 'val', '*' + self.filename_suffix)))
-        self.val_files = [torch.load(i) for i in val_file_names]
+        self.val_files = [pd.read_csv(i, delimiter=' ').to_numpy().astype(np.float32) for i in val_file_names]
+        # self.val_files = [torch.load(i) for i in val_file_names]
 
         logger.info('Validation samples: {}'.format(len(self.val_files)))
 
@@ -93,7 +95,8 @@ class Dataset:
     def testLoader(self):
         self.test_file_names = sorted(
             glob.glob(os.path.join(self.data_root, self.dataset, self.test_split, '*' + self.filename_suffix)))
-        self.test_files = [torch.load(i) for i in self.test_file_names]
+        self.test_files = [pd.read_csv(i, delimiter=' ').to_numpy().astype(np.float32) for i in self.test_file_names]
+        # self.test_files = [torch.load(i) for i in self.test_file_names]
 
         logger.info('Testing samples ({}): {}'.format(self.test_split, len(self.test_files)))
 
@@ -218,7 +221,9 @@ class Dataset:
 
         total_inst_num = 0
         for i, idx in enumerate(id):
-            xyz_origin, rgb, label, instance_label = self.train_files[idx]
+            data = self.train_files[idx]
+            xyz_origin, rgb, label, instance_label = data[:, :3], data[:, 3:6], data[:, 6], data[:, 7]
+            # xyz_origin, rgb, label, instance_label = self.train_files[idx]
 
             # jitter / flip x / rotation
             xyz_middle = self.dataAugment(xyz_origin, True, True, True)
@@ -226,16 +231,16 @@ class Dataset:
             # scale
             xyz = xyz_middle * self.scale
 
-            # elastic
-            ### 3 here need to be changed to same as scale (STPLS3D)
-            xyz = self.elastic(xyz, 6 * self.scale // 2.5, 40 * self.scale / 2.5)
-            xyz = self.elastic(xyz, 20 * self.scale // 2.5, 160 * self.scale / 2.5)
+            # # elastic
+            # ### 3 here need to be changed to same as scale (STPLS3D)
+            # xyz = self.elastic(xyz, 6 * self.scale // 2.5, 40 * self.scale / 2.5)
+            # xyz = self.elastic(xyz, 20 * self.scale // 2.5, 160 * self.scale / 2.5)
 
             # offset
             xyz -= xyz.min(0)
 
             # crop
-            xyz, valid_idxs = self.crop(xyz)
+            xyz, valid_idxs = self.crop2(xyz)
 
             xyz_middle = xyz_middle[valid_idxs]
             xyz = xyz[valid_idxs]
@@ -299,7 +304,9 @@ class Dataset:
 
         total_inst_num = 0
         for i, idx in enumerate(id):
-            xyz_origin, rgb, label, instance_label = self.val_files[idx]
+            data = self.val_files[idx]
+            xyz_origin, rgb, label, instance_label = data[:, :3], data[:, 3:6], data[:, 6], data[:, 7]
+            # xyz_origin, rgb, label, instance_label = self.val_files[idx]
 
             # flip x / rotation
             xyz_middle = self.dataAugment(xyz_origin, False, False, True)
@@ -311,7 +318,7 @@ class Dataset:
             xyz -= xyz.min(0)
 
             # crop
-            xyz, valid_idxs = self.crop(xyz)
+            xyz, valid_idxs = self.crop2(xyz)
 
             xyz_middle = xyz_middle[valid_idxs]
             xyz = xyz[valid_idxs]
@@ -372,9 +379,13 @@ class Dataset:
         for i, idx in enumerate(id):
 
             if self.test_split == 'val':
-                xyz_origin, rgb, label, instance_label = self.test_files[idx]
+                data = self.test_files[idx]
+                xyz_origin, rgb, label, instance_label = data[:, :3], data[:, 3:6], data[:, 6], data[:, 7]
+                # xyz_origin, rgb, label, instance_label = self.test_files[idx]
             elif self.test_split == 'test':
-                xyz_origin, rgb = self.test_files[idx]
+                data = self.test_files[idx]
+                xyz_origin, rgb = data[:, :3], data[:, 3:6]
+                # xyz_origin, rgb = self.test_files[idx]
             else:
                 print("Wrong test split: {}!".format(self.test_split))
                 exit(0)

@@ -9,7 +9,7 @@ import os
 
 def get_parser():
     parser = argparse.ArgumentParser(description='Point Cloud Segmentation')
-    parser.add_argument('--config', type=str, default='config/InsSegNet_default_scannet.yaml', help='path to config file')
+    parser.add_argument('--config', type=str, default='config/InsSegNet_default_urbanscene.yaml', help='path to config file')
 
     ### pretrain
     parser.add_argument('--pretrain', type=str, default='', help='path to pretrain model')
