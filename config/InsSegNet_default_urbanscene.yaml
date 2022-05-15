@@ -14,18 +14,18 @@ DATA:
   ignore_label: -100
 
   input_channel: 3
-  scale: 2.5   # voxel_size = 1 / scale, scale 50(2cm) Deprecated
+  scale: 2   # voxel_size = 1 / scale, scale 50(2cm) Deprecated
   batch_size: 1
   full_scale: [128, 512]  # Deprecated
-  max_npoint: 600000
+  max_npoint: 500000
   mode: 4 # 4=mean
 
   candidate_scale: 3000  # 1 / scale, 1 candidate for every 200 points
-  max_candidate: 150
+  max_candidate: 80
 
 STRUCTURE:
-  model_name: InsSegNet
-  m: 32 # 16 or 32
+  model_name: InsSegNet2
+  m: 16 # 16 or 32
   using_xyz: True
   using_rgb: True
   using_normal: False
@@ -55,8 +55,8 @@ TRAIN:
   weight_pull: 1
   weight_reg: 0.001
 
-  score_scale: 2.5 # the minimal voxel size is 2cm   Deprecated
-  score_fullscale: 14  # Deprecated
+  score_scale: 2 # the minimal voxel size is 2cm   Deprecated
+  score_fullscale: 30
   score_mode: 4 # mean
 
   pretrain_path:

@@ -1,7 +1,10 @@
+import os.path
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
+import random
 import spconv
 from spconv.modules import SparseModule
 import functools
@@ -12,30 +15,70 @@ from lib.pointgroup_ops.functions import pointgroup_ops
 
 from util import utils
 
+################################################################################################
+cnt = 0
 
-class ScoreNet(nn.Module):
-    def __init__(self, in_channel, out_channel):
-        super().__init__()
-        self.conv1 = nn.Conv1d(in_channel, in_channel // 2, 1)
-        self.conv2 = nn.Conv1d(in_channel // 2, in_channel // 4, 1)
-        self.conv3 = nn.Conv1d(in_channel // 4, out_channel, 1)
+def save4visualize(batch, ret):
+    dst = "/media/xue/DATA1/xue/temp/vis_output_epoch368"
 
-        self.bn1 = nn.BatchNorm1d(in_channel // 2)
-        self.bn2 = nn.BatchNorm1d(in_channel // 4)
-        self.bn3 = nn.BatchNorm1d(out_channel)
+    xyz = batch['locs_float'].numpy()  # np.float, (N, 3)
+    labels = batch['labels'].numpy()  # np.int, (N)
+    instance_labels = batch['instance_labels'].numpy()
+    batch_offsets = batch['offsets'].numpy()  # (B + 1, )
 
-    def forward(self, xyz, feats):
-        if feats is None:
-            x = torch.cat((xyz, xyz), dim=2)
-        else:
-            x = torch.cat((xyz, feats), dim=2)
-        x = x.permute(0, 2, 1).contiguous()
+    semantic_scores = ret['semantic_scores'].cpu().detach().numpy()  # (N, nClasses)
+    embedding_feats = ret['embedding_feats'].cpu().detach().numpy()  # (N, nDim)
+    pos_feats = ret['pos_feats'].cpu().detach().numpy()  # (N, nDim)
+    pt_offsets = ret['pt_offsets'].cpu().detach().numpy()  # (N, 3)
 
-        x = F.relu(self.bn1(self.conv1(x)))
-        x = F.relu(self.bn2(self.conv2(x)))
-        x = self.bn3(self.conv3(x))
+    proposals_idx = ret['proposals_idx'].cpu().detach().numpy()  # (N', 2) 0 for proposal_label, 1 for point_idx in N
+    proposals_offset = ret['proposals_offset'].cpu().detach().numpy()  # (nProposal + 1, )
+    object_idxs = ret['object_idxs'].cpu().detach().numpy()  # (N', )
+    candidate_idx = ret['candidate_idx'].cpu().detach().numpy()  # (M, ) index from object points
 
-        return x.permute(0, 2, 1).contiguous()
+    colors = np.array([[random.randint(0, 255), random.randint(0, 255), random.randint(0, 255)]
+                       for _ in range(200)]).astype(np.int)
+
+    # pred
+    sem_pred = np.argmax(semantic_scores, axis=-1)
+    sem_pred_color = colors[sem_pred]
+
+    ins_pred_color = np.array([[0, 0, 0] for _ in range(xyz.shape[0])])
+    ins_pred_color[proposals_idx[:, 1]] = colors[proposals_idx[:, 0]]
+
+    # gt
+    sem_gt_color = colors[labels]
+    ins_gt_color = colors[instance_labels]
+
+    global cnt
+
+    with open(os.path.join(dst, str(cnt) + "_sem_pred.txt"), "w") as writer:
+        for i in range(xyz.shape[0]):
+            writer.write(str(xyz[i][0]) + " " + str(xyz[i][1]) + " " + str(xyz[i][2]) + " " +
+                         str(sem_pred_color[i][0]) + " " + str(sem_pred_color[i][1]) + " " + str(sem_pred_color[i][2]) +
+                         "\n")
+
+    with open(os.path.join(dst, str(cnt) + "_ins_pred.txt"), "w") as writer:
+        for i in range(xyz.shape[0]):
+            writer.write(str(xyz[i][0]) + " " + str(xyz[i][1]) + " " + str(xyz[i][2]) + " " +
+                         str(ins_pred_color[i][0]) + " " + str(ins_pred_color[i][1]) + " " + str(ins_pred_color[i][2]) +
+                         "\n")
+
+    with open(os.path.join(dst, str(cnt) + "_sem_gt.txt"), "w") as writer:
+        for i in range(xyz.shape[0]):
+            writer.write(str(xyz[i][0]) + " " + str(xyz[i][1]) + " " + str(xyz[i][2]) + " " +
+                         str(sem_gt_color[i][0]) + " " + str(sem_gt_color[i][1]) + " " + str(sem_gt_color[i][2]) +
+                         "\n")
+
+    with open(os.path.join(dst, str(cnt) + "_ins_gt.txt"), "w") as writer:
+        for i in range(xyz.shape[0]):
+            writer.write(str(xyz[i][0]) + " " + str(xyz[i][1]) + " " + str(xyz[i][2]) + " " +
+                         str(ins_gt_color[i][0]) + " " + str(ins_gt_color[i][1]) + " " + str(ins_gt_color[i][2]) +
+                         "\n")
+
+    cnt += 1
+
+################################################################################################
 
 
 class ResidualBlock(SparseModule):
@@ -138,6 +181,7 @@ class UBlock(nn.Module):
 class InstanceSegPipline(nn.Module):
     def __init__(self, cfg):
         super().__init__()
+
         input_c = cfg.input_channel
         m = cfg.m
         classes = cfg.classes
@@ -145,6 +189,11 @@ class InstanceSegPipline(nn.Module):
         block_residual = cfg.block_residual
 
         self.cfg = cfg
+
+        self.score_scale = cfg.score_scale
+        self.score_fullscale = cfg.score_fullscale
+        self.mode = cfg.score_mode
+
         self.prepare_epochs = cfg.prepare_epochs
 
         self.pretrain_path = cfg.pretrain_path
@@ -205,16 +254,17 @@ class InstanceSegPipline(nn.Module):
         self.offset_linear = nn.Linear(m, 3, bias=True)
 
         #### score branch
+        self.score_encoder = nn.Sequential(
+            nn.Linear(3 * m, m, bias=True),
+            norm_fn(m),
+            nn.ReLU()
+        )
         self.score_unet = UBlock([m, 2 * m], norm_fn, 2, block, indice_key_id=1)
         self.score_outputlayer = spconv.SparseSequential(
             norm_fn(m),
             nn.ReLU()
         )
         self.score_linear = nn.Linear(m, 1)
-
-        #### scorenet
-        # self.score_net = ScoreNet(cfg.m + 3, self.m)
-        # self.score_linear = nn.Linear(self.m, 1)
 
         self.apply(self.set_bn_init)
 
@@ -245,11 +295,13 @@ class InstanceSegPipline(nn.Module):
             m.weight.data.fill_(1.0)
             m.bias.data.fill_(0.0)
 
-    def proposal_generation(self, feats, candidate_feats, batch_offsets, candidates_batch_offsets):
+    @staticmethod
+    def proposal_generation(feats, candidate_feats, batch_offsets, candidates_batch_offsets):
         proposal_idx = []
         proposals_offset = []
+        proposal_num_batch = [0]
 
-        for i in range(batch_offsets.size[0] - 1):
+        for i in range(batch_offsets.size()[0] - 1):
             feats_batch_i = feats[batch_offsets[i]: batch_offsets[i + 1]]  # (N_i, F)
             candidate_feats_batch_i = candidate_feats[
                                       candidates_batch_offsets[i]: candidates_batch_offsets[i + 1]]  # (M_i, F)
@@ -260,16 +312,66 @@ class InstanceSegPipline(nn.Module):
             proposal_id_i, proposal_point_idx_i = torch.sort(proposal_idx_i)  # 因为pointgroup的接口需要把proposal聚集一块处理
 
             proposal_num = torch.unique(proposal_id_i).size()[0]
+            proposal_num_batch.append(proposal_num)
+
             proposals_offset_i = utils.get_batch_offsets(proposal_id_i, proposal_num)  # proposal offset (nProposal + 1)
             proposals_offset.append(proposals_offset_i)
 
             proposal_id_i, proposal_point_idx_i = proposal_id_i.unsqueeze(1), proposal_point_idx_i.unsqueeze(1)
-            proposal_idx_i = torch.cat((proposal_id_i, proposal_point_idx_i), dim=1)
+            proposal_idx_i = torch.cat((proposal_id_i, proposal_point_idx_i), dim=1).int()
             proposal_idx.append(proposal_idx_i)
 
-        proposal_idx = torch.cat(proposal_idx, dim=0)
+            # del relation_matrix
+
+        # proposal_idx and proposal_offset batch correct
+        for i in range(1, len(proposals_offset)):
+            proposals_offset[i] = proposals_offset[i] + proposals_offset[i - 1][-1]
+            proposals_offset[i] = proposals_offset[i][1:]
+
+            # (put them as [proposal_idx_bactch1, proposal_idx_bactch2 + nproposal_bactch1, ....])
+            proposal_idx[i][0] += proposal_num_batch[i]
+
+        # merge proposal idx and proposal offset
+        proposal_idx = torch.cat(proposal_idx, dim=0).contiguous()
+        proposals_offset = torch.cat(proposals_offset, dim=0).contiguous()
 
         return proposal_idx, proposals_offset
+
+    @staticmethod
+    def select(xyz, feats, xyz_batch_cnt, candidates_batch_cnt):
+        """
+        FPS and then select top k candidate by considering feature entropy
+        :param xyz: input xyz of each points [N, 3]
+        :param feats: input feature of each points [N, F]
+        :return: index of instance candidate points
+        """
+
+        def cal_entropy(feats):
+            """
+            :param feats: [N, F]
+            :return:
+            """
+            softmax_feat = F.softmax(feats, dim=-1)
+            feat_entropy = torch.sum(-softmax_feat * torch.log(softmax_feat), dim=-1)  # sigma{-fi * log{fi}}, [B, N]
+            return feat_entropy
+
+        # assert xyz.size()[1] == feats.size()[1]
+        # points_num = xyz.size()[1]
+
+        candidate_idx = pointnet2_utils.stack_farthest_point_sample(xyz, xyz_batch_cnt,
+                                                                    candidates_batch_cnt).long()  # fps采样，返回index [B, NSample]
+        # candidate_idx = pointnet2_utils.furthest_point_sample(xyz, candidates_num)  # fps采样，返回index [B, NSample]
+        # idx = pointnet2_utils.furthest_point_sample(xyz, points_num // 2)  # fps采样，返回index [B, NSample]
+        # gather_feature = pointnet2_utils.gather_operation(feats.permute(0, 2, 1).contiguous(),
+        #                                                   idx).permute(0, 2, 1).contiguous()  # 根据index获取采样点
+        # gather_feature = gather_feature.cpu()
+        #
+        # feat_entropy = cal_entropy(gather_feature)
+        # sorted_idx = feat_entropy.sort(dim=-1)[1][:, :candidates_num].long()  # [B, NSample]
+        # sorted_idx = sorted_idx.to("cuda")
+        # candidate_idx = torch.gather(idx, -1, sorted_idx)
+
+        return candidate_idx
 
     def clusters_voxelization(self, clusters_idx, clusters_offset, feats, coords, fullscale, scale, mode):
         '''
@@ -327,41 +429,6 @@ class InstanceSegPipline(nn.Module):
 
         return voxelization_feats, inp_map
 
-    def select(self, xyz, feats, xyz_batch_cnt, candidates_batch_cnt):
-        """
-        FPS and then select top k candidate by considering feature entropy
-        :param xyz: input xyz of each points [N, 3]
-        :param feats: input feature of each points [N, F]
-        :return: index of instance candidate points
-        """
-
-        def cal_entropy(feats):
-            """
-            :param feats: [N, F]
-            :return:
-            """
-            softmax_feat = F.softmax(feats, dim=-1)
-            feat_entropy = torch.sum(-softmax_feat * torch.log(softmax_feat), dim=-1)  # sigma{-fi * log{fi}}, [B, N]
-            return feat_entropy
-
-        # assert xyz.size()[1] == feats.size()[1]
-        # points_num = xyz.size()[1]
-
-        candidate_idx = pointnet2_utils.stack_farthest_point_sample(xyz, xyz_batch_cnt,
-                                                                    candidates_batch_cnt)  # fps采样，返回index [B, NSample]
-        # candidate_idx = pointnet2_utils.furthest_point_sample(xyz, candidates_num)  # fps采样，返回index [B, NSample]
-        # idx = pointnet2_utils.furthest_point_sample(xyz, points_num // 2)  # fps采样，返回index [B, NSample]
-        # gather_feature = pointnet2_utils.gather_operation(feats.permute(0, 2, 1).contiguous(),
-        #                                                   idx).permute(0, 2, 1).contiguous()  # 根据index获取采样点
-        # gather_feature = gather_feature.cpu()
-        #
-        # feat_entropy = cal_entropy(gather_feature)
-        # sorted_idx = feat_entropy.sort(dim=-1)[1][:, :candidates_num].long()  # [B, NSample]
-        # sorted_idx = sorted_idx.to(self.device)
-        # candidate_idx = torch.gather(idx, -1, sorted_idx)
-
-        return candidate_idx
-
     def forward(self, input, input_map, coords, batch_idxs, batch_offsets, epoch):
         '''
         :param input_map: (N), int, cuda
@@ -396,19 +463,16 @@ class InstanceSegPipline(nn.Module):
         pt_offsets = self.offset_linear(pt_offsets_feats)  # (N, 3), float32
         ret['pt_offsets'] = pt_offsets
 
-        feats = torch.cat((semantic_feats, embedding_feats, pos_feats), dim=-1).unsqueeze(-1)
+        feats = torch.cat((semantic_feats, embedding_feats, pos_feats), dim=-1)
 
-        coords_idx = torch.tensor(range(batch_idxs.size()[0]), device=batch_idxs.device)
-
-        if (epoch > self.prepare_epochs):
+        if (epoch >= self.prepare_epochs):
             #### get prooposal clusters
-            object_idxs = torch.nonzero(semantic_preds > 1).view(-1)
+            object_idxs = torch.nonzero(semantic_preds > 0).view(-1)  # 0 for non-object class
 
             batch_idxs_ = batch_idxs[object_idxs]
             batch_offsets_ = utils.get_batch_offsets(batch_idxs_, input.batch_size)
             coords_ = coords[object_idxs]
             feats_ = feats[object_idxs]
-            coords_idx_ = coords_idx[object_idxs]
 
             xyz_batch_cnt = torch.tensor([batch_offsets_[i] - batch_offsets_[i - 1]
                                           for i in range(1, batch_offsets_.size()[0])],
@@ -418,9 +482,9 @@ class InstanceSegPipline(nn.Module):
             candidates_batch_cnt = xyz_batch_cnt // self.cfg.candidate_scale
             candidates_batch_cnt = torch.clamp(candidates_batch_cnt, 10, self.cfg.max_candidate).int()
 
-            candidates_batch_offsets = torch.tensor([0] * (batch_offsets_.size[0] + 1),
+            candidates_batch_offsets = torch.tensor([0] * batch_offsets_.size()[0],
                                                     device=batch_offsets_.device).int()  # (B + 1,)
-            for i in candidates_batch_cnt.size()[0]:
+            for i in range(candidates_batch_cnt.size()[0]):
                 candidates_batch_offsets[i + 1] = candidates_batch_offsets[i] + candidates_batch_cnt[i]
 
             candidate_idx = self.select(coords_, feats_, xyz_batch_cnt, candidates_batch_cnt)  # select module
@@ -429,13 +493,23 @@ class InstanceSegPipline(nn.Module):
             # proposal generation
             proposals_idx, proposals_offset = self.proposal_generation(feats_, candidate_feats,
                                                                        batch_offsets_, candidates_batch_offsets)  # [N,]
+
+            torch.cuda.empty_cache()
+
             proposals_idx[:, 1] = object_idxs[proposals_idx[:, 1].long()].int()
             # proposals_idx: (sumNPoint, 2), int, dim 0 for cluster_id, dim 1 for corresponding point idxs in N
             # proposals_offset: (nProposal + 1), int
 
+            # # for debug to output some intermediate results
+            # ret['proposals_idx'] = proposals_idx
+            # ret['proposals_offset'] = proposals_offset
+            # ret['object_idxs'] = object_idxs
+            # ret['candidate_idx'] = candidate_idx
+
             #### proposals voxelization again
-            input_feats, inp_map = self.clusters_voxelization(proposals_idx, proposals_offset, feats, coords,
-                                                              self.score_fullscale, self.score_scale, self.mode)
+            score_feats = self.score_encoder(feats)
+            input_feats, inp_map = self.clusters_voxelization(proposals_idx.cpu(), proposals_offset.cpu(), score_feats,
+                                                              coords, self.score_fullscale, self.score_scale, self.mode)
 
             #### score
             score = self.score_unet(input_feats)
@@ -490,6 +564,9 @@ def model_fn_decorator(test=False):
         # get and unpack model result
         ret = model(input_, p2v_map, coords_float, coords[:, 0].int(), batch_offsets, epoch)
 
+        # # for debug to output some intermediate results
+        # save4visualize(batch, ret)
+
         embedding_feats = ret['embedding_feats']  # [B, N, F] embedding feats for calculating the embedding loss
         semantic_scores = ret['semantic_scores']  # [N, nclass]
         pt_offsets = ret['pt_offsets']  # (N, 3), float32, cuda
@@ -506,19 +583,7 @@ def model_fn_decorator(test=False):
         if (epoch > cfg.prepare_epochs):
             loss_inp['proposal_scores'] = (scores, proposals_idx, proposals_offset, instance_pointnum)
 
-        try:
-            loss, loss_out, infos = loss_fn(loss_inp, epoch)
-        except:
-            xyz = coords_float.cpu().detach().numpy()
-            feats = (feats.cpu().detach().numpy() + 1) * 127.5
-
-            out = np.concatenate((xyz, feats), axis=-1)
-
-            np.savetxt("error_points.txt", out, fmt="%.4f")
-
-
-
-
+        loss, loss_out, infos = loss_fn(loss_inp, epoch)
 
         ##### accuracy / visual_dict / meter_dict
         with torch.no_grad():
@@ -636,7 +701,7 @@ def model_fn_decorator(test=False):
             # proposals_offset: (nProposal + 1), int, cpu
             # instance_pointnum: (total_nInst), int
 
-            ious = pointgroup_ops.get_iou(proposals_idx[:, 1].cuda(), proposals_offset.cuda(), instance_labels,
+            ious = pointgroup_ops.get_iou(proposals_idx[:, 1].contiguous(), proposals_offset, instance_labels,
                                           instance_pointnum)  # (nProposal, nInstance), float
             gt_ious, gt_instance_idxs = ious.max(1)  # (nProposal) float, long
             gt_scores = get_segmented_scores(gt_ious, cfg.fg_thresh, cfg.bg_thresh)

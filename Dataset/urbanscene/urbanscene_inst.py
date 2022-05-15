@@ -233,8 +233,8 @@ class Dataset:
 
             # # elastic
             # ### 3 here need to be changed to same as scale (STPLS3D)
-            # xyz = self.elastic(xyz, 6 * self.scale // 2.5, 40 * self.scale / 2.5)
-            # xyz = self.elastic(xyz, 20 * self.scale // 2.5, 160 * self.scale / 2.5)
+            # xyz = self.elastic(xyz, 6 * self.scale // 2, 40 * self.scale / 2)
+            # xyz = self.elastic(xyz, 20 * self.scale // 2, 160 * self.scale / 2)
 
             # offset
             xyz -= xyz.min(0)

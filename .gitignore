@@ -13,3 +13,4 @@
 /lib/pcdet/dist/
 /lib/pcdet/ops/pointnet2/pointnet2_stack/pointnet2_stack_cuda.cpython-36m-x86_64-linux-gnu.so
 /lib/pcdet/ops/pointnet2/pointnet2_batch/pointnet2_batch_cuda.cpython-36m-x86_64-linux-gnu.so
+/my_visualior.py

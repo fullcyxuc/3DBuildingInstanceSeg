@@ -60,6 +60,17 @@ def checkpoint_restore(model, exp_path, exp_name, use_cuda=True, epoch=0, dist=F
     if len(f) > 0:
         logger.info('Restore from ' + f)
         checkpoint = torch.load(f)
+
+        # # define some modified module
+        # m = 32
+        # checkpoint['score_encoder.0.weight'] = torch.randn((m, m * 3))
+        # checkpoint['score_encoder.0.bias'] = torch.randn((m, ))
+        # checkpoint['score_encoder.1.weight'] = torch.randn((m,))
+        # checkpoint['score_encoder.1.bias'] = torch.randn((m,))
+        # checkpoint['score_encoder.1.running_mean'] = torch.zeros((m,))
+        # checkpoint['score_encoder.1.running_var'] = torch.ones((m,))
+        # checkpoint['score_encoder.1.num_batches_tracked'] = torch.zeros((1,)).int()
+
         for k, v in checkpoint.items():
             if 'module.' in k:
                 checkpoint = {k[len('module.'):]: v for k, v in checkpoint.items()}

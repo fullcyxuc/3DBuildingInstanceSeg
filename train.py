@@ -65,24 +65,24 @@ def train_epoch(train_loader, model, model_fn, optimizer, epoch):
         optimizer.step()
 
         ##### time and print
-        current_iter = (epoch - 1) * len(train_loader) + i + 1
-        max_iter = cfg.epochs * len(train_loader)
-        remain_iter = max_iter - current_iter
+        # current_iter = (epoch - 1) * len(train_loader) + i + 1
+        # max_iter = cfg.epochs * len(train_loader)
+        # remain_iter = max_iter - current_iter
+        #
+        # iter_time.update(time.time() - end)
+        # end = time.time()
+        #
+        # remain_time = remain_iter * iter_time.avg
+        # t_m, t_s = divmod(remain_time, 60)
+        # t_h, t_m = divmod(t_m, 60)
+        # remain_time = '{:02d}:{:02d}:{:02d}'.format(int(t_h), int(t_m), int(t_s))
 
-        iter_time.update(time.time() - end)
-        end = time.time()
-
-        remain_time = remain_iter * iter_time.avg
-        t_m, t_s = divmod(remain_time, 60)
-        t_h, t_m = divmod(t_m, 60)
-        remain_time = '{:02d}:{:02d}:{:02d}'.format(int(t_h), int(t_m), int(t_s))
-
-        if i % 50 == 0 or i == len(train_loader) - 1:
-            sys.stdout.write(
-                "epoch: {}/{} iter: {}/{} loss: {:.4f}({:.4f}) data_time: {:.2f}({:.2f}) iter_time: {:.2f}({:.2f}) remain_time: {remain_time}\n".format
-                (epoch, cfg.epochs, i + 1, len(train_loader), am_dict['loss'].val, am_dict['loss'].avg,
-                 data_time.val, data_time.avg, iter_time.val, iter_time.avg, remain_time=remain_time))
-        if (i == len(train_loader) - 1): print()
+        # if i % 50 == 0 or i == len(train_loader) - 1:
+        #     sys.stdout.write(
+        #         "epoch: {}/{} iter: {}/{} loss: {:.4f}({:.4f}) data_time: {:.2f}({:.2f}) iter_time: {:.2f}({:.2f}) remain_time: {remain_time}\n".format
+        #         (epoch, cfg.epochs, i + 1, len(train_loader), am_dict['loss'].val, am_dict['loss'].avg,
+        #          data_time.val, data_time.avg, iter_time.val, iter_time.avg, remain_time=remain_time))
+        # if (i == len(train_loader) - 1): print()
 
 
     logger.info("epoch: {}/{}, train loss: {:.4f}, time: {}s".format(epoch, cfg.epochs, am_dict['loss'].avg, time.time() - start_epoch))
@@ -113,10 +113,9 @@ def eval_epoch(val_loader, model, model_fn, epoch):
                 am_dict[k].update(v[0], v[1])
 
             ##### print
-            if i % 40 == 0 or i == len(val_loader) - 1:
-                sys.stdout.write(
-                    "\riter: {}/{} loss: {:.4f}({:.4f})".format(i + 1, len(val_loader), am_dict['loss'].val,
-                                                                am_dict['loss'].avg))
+            sys.stdout.write(
+                "\riter: {}/{} loss: {:.4f}({:.4f})".format(i + 1, len(val_loader), am_dict['loss'].val,
+                                                            am_dict['loss'].avg))
 
             if (i == len(val_loader) - 1): print()
 
@@ -185,3 +184,8 @@ if __name__ == '__main__':
 
         if utils.is_multiple(epoch, cfg.save_freq) or utils.is_power2(epoch):
             eval_epoch(dataset.val_data_loader, model, model_fn, epoch)
+
+    # ##### val
+    # for epoch in range(start_epoch, cfg.epochs + 1):
+    #     eval_epoch(dataset.val_data_loader, model, model_fn, epoch)
+
