@@ -143,6 +143,19 @@ def get_batch_offsets(batch_idxs, bs):
     return batch_offsets
 
 
+def get_merged_proposal_labels(remapper):
+    '''
+    :param remapper: (ncandidate), int
+    :return: remap the candidate proposal idx remapper from 0 to nproposal - 1
+    '''
+    unique_remapper = torch.unique(remapper)
+    nproposal = unique_remapper.size(0)
+
+    for i in range(nproposal):
+        remapper[remapper == unique_remapper[i]] = i
+    return remapper
+
+
 def print_error(message, user_fault=False):
     sys.stderr.write('ERROR: ' + str(message) + '\n')
     if user_fault:

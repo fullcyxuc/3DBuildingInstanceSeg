@@ -64,5 +64,5 @@ python setup.py develop
 
 
 ## Acknowledgement
-This repo is built upon several repos, e.g., [Pointgroup](https://github.com/dvlab-research/PointGroup.gitCloning) [SparseConvNet](https://github.com/facebookresearch/SparseConvNet), [spconv](https://github.com/traveller59/spconv), [IA-SSD](https://github.com/yifanzhang713/IA-SSD/tree/main/pcdet/ops) and [STPLS3D](https://github.com/meidachen/STPLS3D.git). 
+This repo is built upon several repos, e.g., [Pointgroup](https://github.com/dvlab-research/PointGroup.gitCloning), [SparseConvNet](https://github.com/facebookresearch/SparseConvNet), [spconv](https://github.com/traveller59/spconv), [IA-SSD](https://github.com/yifanzhang713/IA-SSD/tree/main/pcdet/ops) and [STPLS3D](https://github.com/meidachen/STPLS3D.git). 
 

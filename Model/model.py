@@ -39,6 +39,14 @@ def save4visualize(batch, ret):
     colors = np.array([[random.randint(0, 255), random.randint(0, 255), random.randint(0, 255)]
                        for _ in range(200)]).astype(np.int)
 
+    # candidate
+    candidate_xyz = xyz[object_idxs][candidate_idx]
+    candidate_color = np.array([[0, 0, 255] for _ in range(candidate_xyz.shape[0])])
+
+    candidate_offset = pt_offsets[object_idxs][candidate_idx]
+    candidate_xyz_offset = candidate_xyz + candidate_offset
+    candidate_offset_color = np.array([[255, 0, 0] for _ in range(candidate_xyz.shape[0])])
+
     # pred
     sem_pred = np.argmax(semantic_scores, axis=-1)
     sem_pred_color = colors[sem_pred]
@@ -52,29 +60,40 @@ def save4visualize(batch, ret):
 
     global cnt
 
-    with open(os.path.join(dst, str(cnt) + "_sem_pred.txt"), "w") as writer:
-        for i in range(xyz.shape[0]):
-            writer.write(str(xyz[i][0]) + " " + str(xyz[i][1]) + " " + str(xyz[i][2]) + " " +
-                         str(sem_pred_color[i][0]) + " " + str(sem_pred_color[i][1]) + " " + str(sem_pred_color[i][2]) +
+    with open(os.path.join(dst, str(cnt) + "_candidate_xyz.txt"), "w") as writer:
+        for i in range(candidate_xyz.shape[0]):
+            writer.write(str(candidate_xyz[i][0]) + " " + str(candidate_xyz[i][1]) + " " + str(candidate_xyz[i][2]) + " " +
+                         str(candidate_color[i][0]) + " " + str(candidate_color[i][1]) + " " + str(candidate_color[i][2]) +
+                         "\n")
+    with open(os.path.join(dst, str(cnt) + "_candidate_xyz_offset.txt"), "w") as writer:
+        for i in range(candidate_xyz_offset.shape[0]):
+            writer.write(str(candidate_xyz_offset[i][0]) + " " + str(candidate_xyz_offset[i][1]) + " " + str(candidate_xyz_offset[i][2]) + " " +
+                         str(candidate_offset_color[i][0]) + " " + str(candidate_offset_color[i][1]) + " " + str(candidate_offset_color[i][2]) +
                          "\n")
 
-    with open(os.path.join(dst, str(cnt) + "_ins_pred.txt"), "w") as writer:
+    # with open(os.path.join(dst, str(cnt) + "_sem_pred.txt"), "w") as writer:
+    #     for i in range(xyz.shape[0]):
+    #         writer.write(str(xyz[i][0]) + " " + str(xyz[i][1]) + " " + str(xyz[i][2]) + " " +
+    #                      str(sem_pred_color[i][0]) + " " + str(sem_pred_color[i][1]) + " " + str(sem_pred_color[i][2]) +
+    #                      "\n")
+
+    with open(os.path.join(dst, str(cnt) + "_ins_merge_pred.txt"), "w") as writer:
         for i in range(xyz.shape[0]):
             writer.write(str(xyz[i][0]) + " " + str(xyz[i][1]) + " " + str(xyz[i][2]) + " " +
                          str(ins_pred_color[i][0]) + " " + str(ins_pred_color[i][1]) + " " + str(ins_pred_color[i][2]) +
                          "\n")
 
-    with open(os.path.join(dst, str(cnt) + "_sem_gt.txt"), "w") as writer:
-        for i in range(xyz.shape[0]):
-            writer.write(str(xyz[i][0]) + " " + str(xyz[i][1]) + " " + str(xyz[i][2]) + " " +
-                         str(sem_gt_color[i][0]) + " " + str(sem_gt_color[i][1]) + " " + str(sem_gt_color[i][2]) +
-                         "\n")
-
-    with open(os.path.join(dst, str(cnt) + "_ins_gt.txt"), "w") as writer:
-        for i in range(xyz.shape[0]):
-            writer.write(str(xyz[i][0]) + " " + str(xyz[i][1]) + " " + str(xyz[i][2]) + " " +
-                         str(ins_gt_color[i][0]) + " " + str(ins_gt_color[i][1]) + " " + str(ins_gt_color[i][2]) +
-                         "\n")
+    # with open(os.path.join(dst, str(cnt) + "_sem_gt.txt"), "w") as writer:
+    #     for i in range(xyz.shape[0]):
+    #         writer.write(str(xyz[i][0]) + " " + str(xyz[i][1]) + " " + str(xyz[i][2]) + " " +
+    #                      str(sem_gt_color[i][0]) + " " + str(sem_gt_color[i][1]) + " " + str(sem_gt_color[i][2]) +
+    #                      "\n")
+    #
+    # with open(os.path.join(dst, str(cnt) + "_ins_gt.txt"), "w") as writer:
+    #     for i in range(xyz.shape[0]):
+    #         writer.write(str(xyz[i][0]) + " " + str(xyz[i][1]) + " " + str(xyz[i][2]) + " " +
+    #                      str(ins_gt_color[i][0]) + " " + str(ins_gt_color[i][1]) + " " + str(ins_gt_color[i][2]) +
+    #                      "\n")
 
     cnt += 1
 
@@ -296,34 +315,74 @@ class InstanceSegPipline(nn.Module):
             m.bias.data.fill_(0.0)
 
     @staticmethod
-    def proposal_generation(feats, candidate_feats, batch_offsets, candidates_batch_offsets):
+    def cal_connection_components(adjacency):
+        def bfs(node):
+            cc = [node]
+            q = [node]
+            visit[node] = 1
+            while q:
+                node = q.pop()
+                for neihbor in nodes:
+                    if not visit[neihbor] and adjacency[node][neihbor] == 1:
+                        q.append(neihbor)
+                        cc.append(neihbor)
+                        visit[neihbor] = 1
+            nonlocal ccs
+            ccs.append(cc)
+        n = adjacency.size(0)
+        nodes = range(n)
+        visit = [0] * n
+        ccs = []
+        for i in nodes:
+            if not visit[i]:
+                bfs(i)
+        return ccs
+
+    def proposal_generation(self, feats, candidate_feats, candidate_xyz, batch_offsets, candidates_batch_offsets):
         proposal_idx = []
         proposals_offset = []
         proposal_num_batch = [0]
 
-        for i in range(batch_offsets.size()[0] - 1):
+        for i in range(batch_offsets.size(0) - 1):
             feats_batch_i = feats[batch_offsets[i]: batch_offsets[i + 1]]  # (N_i, F)
             candidate_feats_batch_i = candidate_feats[
-                                      candidates_batch_offsets[i]: candidates_batch_offsets[i + 1]]  # (M_i, F)
+                                      candidates_batch_offsets[i]: candidates_batch_offsets[i + 1]]  # (K_i, F)
+            candidate_xyz_batch_i = candidate_xyz[candidates_batch_offsets[i]: candidates_batch_offsets[i + 1]]
+            ncandidate = candidate_feats_batch_i.size(0)
 
-            relation_matrix = torch.norm(feats_batch_i.unsqueeze(1) - candidate_feats_batch_i.unsqueeze(0), dim=-1,
-                                         p=2)  # (N_i, M_i)
-            proposal_idx_i = torch.argmin(relation_matrix, dim=-1)  # (N_i) todo: merge the proposal
-            proposal_id_i, proposal_point_idx_i = torch.sort(proposal_idx_i)  # 因为pointgroup的接口需要把proposal聚集一块处理
+            ## relation matrix between all points and candidate points [N_i, K_i]
+            relation_matrix = torch.norm(feats_batch_i.unsqueeze(1) - candidate_feats_batch_i.unsqueeze(0), dim=-1, p=2)
+            proposal_idx_i = torch.argmin(relation_matrix, dim=-1)  # (N_i)
+            del relation_matrix  # too large, release memory as long as it is done
 
-            proposal_num = torch.unique(proposal_id_i).size()[0]
+            ## merge the proposal
+            # relation matrix between candidate points for merging [K_i, K_i]
+            relation_matrix_proposals = torch.norm(candidate_xyz_batch_i.unsqueeze(1) -
+                                                   candidate_xyz_batch_i.unsqueeze(0), dim=-1, p=2)
+            adjacency = torch.zeros_like(relation_matrix_proposals, dtype=torch.long)
+            adjacency[relation_matrix_proposals < 8] = 1  # 0-1 matrix, 1 for two proposals belong to each other
+            # calculate the connection components of the relation matrix
+            ccs = self.cal_connection_components(adjacency)
+            del relation_matrix_proposals, adjacency
+
+            # remap the proposal label to the merged label, from 0 to nproposal
+            remapper = torch.arange(0, ncandidate, device="cuda").long()
+            for cc_i in range(len(ccs)):
+                remapper[ccs[cc_i]] = cc_i
+            remapper = utils.get_merged_proposal_labels(remapper)
+            proposal_idx_i = remapper[proposal_idx_i]
+            proposal_idx_i, proposal_point_idx_i = torch.sort(proposal_idx_i)  # 因为pointgroup的接口需要把proposal聚集一块处理
+            proposal_num = torch.unique(proposal_idx_i).size(0)
             proposal_num_batch.append(proposal_num)
 
-            proposals_offset_i = utils.get_batch_offsets(proposal_id_i, proposal_num)  # proposal offset (nProposal + 1)
+            proposals_offset_i = utils.get_batch_offsets(proposal_idx_i, proposal_num)  # proposal offset (nProposal + 1)
             proposals_offset.append(proposals_offset_i)
 
-            proposal_id_i, proposal_point_idx_i = proposal_id_i.unsqueeze(1), proposal_point_idx_i.unsqueeze(1)
-            proposal_idx_i = torch.cat((proposal_id_i, proposal_point_idx_i), dim=1).int()
+            proposal_idx_i, proposal_point_idx_i = proposal_idx_i.unsqueeze(1), proposal_point_idx_i.unsqueeze(1)
+            proposal_idx_i = torch.cat((proposal_idx_i, proposal_point_idx_i), dim=1).int()
             proposal_idx.append(proposal_idx_i)
 
-            # del relation_matrix
-
-        # proposal_idx and proposal_offset batch correct
+        ## proposal_idx and proposal_offset batch correct
         for i in range(1, len(proposals_offset)):
             proposals_offset[i] = proposals_offset[i] + proposals_offset[i - 1][-1]
             proposals_offset[i] = proposals_offset[i][1:]
@@ -331,7 +390,7 @@ class InstanceSegPipline(nn.Module):
             # (put them as [proposal_idx_bactch1, proposal_idx_bactch2 + nproposal_bactch1, ....])
             proposal_idx[i][0] += proposal_num_batch[i]
 
-        # merge proposal idx and proposal offset
+        ## concat proposal idx and proposal offset
         proposal_idx = torch.cat(proposal_idx, dim=0).contiguous()
         proposals_offset = torch.cat(proposals_offset, dim=0).contiguous()
 
@@ -355,8 +414,8 @@ class InstanceSegPipline(nn.Module):
             feat_entropy = torch.sum(-softmax_feat * torch.log(softmax_feat), dim=-1)  # sigma{-fi * log{fi}}, [B, N]
             return feat_entropy
 
-        # assert xyz.size()[1] == feats.size()[1]
-        # points_num = xyz.size()[1]
+        # assert xyz.size(1) == feats.size(1)
+        # points_num = xyz.size(1)
 
         candidate_idx = pointnet2_utils.stack_farthest_point_sample(xyz, xyz_batch_cnt,
                                                                     candidates_batch_cnt).long()  # fps采样，返回index [B, NSample]
@@ -472,33 +531,35 @@ class InstanceSegPipline(nn.Module):
             batch_idxs_ = batch_idxs[object_idxs]
             batch_offsets_ = utils.get_batch_offsets(batch_idxs_, input.batch_size)
             coords_ = coords[object_idxs]
-            feats_ = feats[object_idxs]
+            feats_ = torch.cat([embedding_feats[object_idxs], pos_feats[object_idxs]], dim=-1)
+            # feats_ = feats[object_idxs]
+            pt_offsets_ = pt_offsets[object_idxs]
 
             xyz_batch_cnt = torch.tensor([batch_offsets_[i] - batch_offsets_[i - 1]
-                                          for i in range(1, batch_offsets_.size()[0])],
+                                          for i in range(1, batch_offsets_.size(0))],
                                          device=batch_offsets_.device).int()  # (B,)
 
             # assume the num_candidates for each batch are different
             candidates_batch_cnt = xyz_batch_cnt // self.cfg.candidate_scale
             candidates_batch_cnt = torch.clamp(candidates_batch_cnt, 10, self.cfg.max_candidate).int()
 
-            candidates_batch_offsets = torch.tensor([0] * batch_offsets_.size()[0],
+            candidates_batch_offsets = torch.tensor([0] * batch_offsets_.size(0),
                                                     device=batch_offsets_.device).int()  # (B + 1,)
-            for i in range(candidates_batch_cnt.size()[0]):
+            for i in range(candidates_batch_cnt.size(0)):
                 candidates_batch_offsets[i + 1] = candidates_batch_offsets[i] + candidates_batch_cnt[i]
 
             candidate_idx = self.select(coords_, feats_, xyz_batch_cnt, candidates_batch_cnt)  # select module
             candidate_feats = feats_[candidate_idx]  # (M, F)
-
+            candidate_offset = pt_offsets_[candidate_idx]
+            candidate_xyz_offseted = coords_[candidate_idx] + candidate_offset
             # proposal generation
-            proposals_idx, proposals_offset = self.proposal_generation(feats_, candidate_feats,
-                                                                       batch_offsets_, candidates_batch_offsets)  # [N,]
-
-            torch.cuda.empty_cache()
-
+            proposals_idx, proposals_offset = self.proposal_generation(feats_, candidate_feats, candidate_xyz_offseted,
+                                                                       batch_offsets_, candidates_batch_offsets)
             proposals_idx[:, 1] = object_idxs[proposals_idx[:, 1].long()].int()
             # proposals_idx: (sumNPoint, 2), int, dim 0 for cluster_id, dim 1 for corresponding point idxs in N
             # proposals_offset: (nProposal + 1), int
+
+            torch.cuda.empty_cache()
 
             # # for debug to output some intermediate results
             # ret['proposals_idx'] = proposals_idx
@@ -648,7 +709,7 @@ def model_fn_decorator(test=False):
 
         instance_labels_unique = torch.unique(instance_labels)
         instance_labels_unique = instance_labels_unique[instance_labels_unique != cfg.ignore_label]
-        instance_num = instance_labels_unique.size()[0]
+        instance_num = instance_labels_unique.size(0)
 
         # pull loss
         pull_loss = 0.0
