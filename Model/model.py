@@ -404,31 +404,7 @@ class InstanceSegPipline(nn.Module):
         :param feats: input feature of each points [N, F]
         :return: index of instance candidate points
         """
-
-        def cal_entropy(feats):
-            """
-            :param feats: [N, F]
-            :return:
-            """
-            softmax_feat = F.softmax(feats, dim=-1)
-            feat_entropy = torch.sum(-softmax_feat * torch.log(softmax_feat), dim=-1)  # sigma{-fi * log{fi}}, [B, N]
-            return feat_entropy
-
-        # assert xyz.size(1) == feats.size(1)
-        # points_num = xyz.size(1)
-
-        candidate_idx = pointnet2_utils.stack_farthest_point_sample(xyz, xyz_batch_cnt,
-                                                                    candidates_batch_cnt).long()  # fps采样，返回index [B, NSample]
-        # candidate_idx = pointnet2_utils.furthest_point_sample(xyz, candidates_num)  # fps采样，返回index [B, NSample]
-        # idx = pointnet2_utils.furthest_point_sample(xyz, points_num // 2)  # fps采样，返回index [B, NSample]
-        # gather_feature = pointnet2_utils.gather_operation(feats.permute(0, 2, 1).contiguous(),
-        #                                                   idx).permute(0, 2, 1).contiguous()  # 根据index获取采样点
-        # gather_feature = gather_feature.cpu()
-        #
-        # feat_entropy = cal_entropy(gather_feature)
-        # sorted_idx = feat_entropy.sort(dim=-1)[1][:, :candidates_num].long()  # [B, NSample]
-        # sorted_idx = sorted_idx.to("cuda")
-        # candidate_idx = torch.gather(idx, -1, sorted_idx)
+        candidate_idx = pointnet2_utils.stack_farthest_point_sample(xyz, xyz_batch_cnt, candidates_batch_cnt).long()
 
         return candidate_idx
 
@@ -452,8 +428,7 @@ class InstanceSegPipline(nn.Module):
         clusters_coords_min = pointgroup_ops.sec_min(clusters_coords, clusters_offset.cuda())  # (nCluster, 3), float
         clusters_coords_max = pointgroup_ops.sec_max(clusters_coords, clusters_offset.cuda())  # (nCluster, 3), float
 
-        clusters_scale = 1 / ((clusters_coords_max - clusters_coords_min) / fullscale).max(1)[
-            0] - 0.01  # (nCluster), float
+        clusters_scale = 1 / ((clusters_coords_max - clusters_coords_min) / fullscale).max(1)[0] - 0.01  # (nCluster), float
         clusters_scale = torch.clamp(clusters_scale, min=None, max=scale)
 
         min_xyz = clusters_coords_min * clusters_scale.unsqueeze(-1)  # (nCluster, 3), float
@@ -591,7 +566,40 @@ def model_fn_decorator(test=False):
     score_criterion = nn.BCELoss(reduction='none').to(cfg.device)
 
     def test_model_fn(batch, model, epoch):
-        pass
+        coords = batch['locs'].cuda()                           # (N, 1 + 3), long, cuda, dimension 0 for batch_idx
+        voxel_coords = batch['voxel_locs'].cuda()               # (M, 1 + 3), long, cuda
+        p2v_map = batch['p2v_map'].cuda()                       # (N), int, cuda
+        v2p_map = batch['v2p_map'].cuda()                       # (M, 1 + maxActive), int, cuda
+
+        coords_float = batch['locs_float'].cuda()               # (N, 3), float32, cuda
+        feats = batch['feats'].cuda()                           # (N, C), float32, cuda
+        batch_offsets = batch['offsets'].cuda()                 # (B + 1), int, cuda
+        spatial_shape = batch['spatial_shape']
+
+        if cfg.use_coords:
+            feats = torch.cat((feats, coords_float), 1)
+
+        voxel_feats = pointgroup_ops.voxelization(feats, v2p_map, cfg.mode)  # (M, C), float, cuda
+
+        input_ = spconv.SparseConvTensor(voxel_feats, voxel_coords.int(), spatial_shape, cfg.batch_size)
+
+        ret = model(input_, p2v_map, coords_float, coords[:, 0].int(), batch_offsets, epoch, 'test')
+        semantic_scores = ret['semantic_scores']  # (N, nClass) float32, cuda
+        pt_offsets = ret['pt_offsets']  # (N, 3), float32, cuda
+
+        if (epoch > cfg.prepare_epochs):
+            scores, proposals_idx, proposals_offset = ret['proposal_scores']
+
+        # preds
+        with torch.no_grad():
+            preds = {}
+            preds['semantic'] = semantic_scores
+            preds['pt_offsets'] = pt_offsets
+            if (epoch > cfg.prepare_epochs):
+                preds['score'] = scores
+                preds['proposals'] = (proposals_idx, proposals_offset)
+
+        return preds
 
     def train_model_fn(batch, model, epoch):
         ##### prepare input and forward
@@ -599,20 +607,20 @@ def model_fn_decorator(test=False):
         # 'locs_float': locs_float, 'feats': feats, 'labels': labels, 'instance_labels': instance_labels,
         # 'instance_info': instance_infos, 'instance_pointnum': instance_pointnum,
         # 'id': tbl, 'offsets': batch_offsets, 'spatial_shape': spatial_shape}
-        coords = batch['locs'].cuda()  # (N, 1 + 3), long, cuda, dimension 0 for batch_idx
-        voxel_coords = batch['voxel_locs'].cuda()  # (M, 1 + 3), long, cuda
-        p2v_map = batch['p2v_map'].cuda()  # (N), int, cuda
-        v2p_map = batch['v2p_map'].cuda()  # (M, 1 + maxActive), int, cuda
+        coords = batch['locs'].cuda()                           # (N, 1 + 3), long, cuda, dimension 0 for batch_idx
+        voxel_coords = batch['voxel_locs'].cuda()               # (M, 1 + 3), long, cuda
+        p2v_map = batch['p2v_map'].cuda()                       # (N), int, cuda
+        v2p_map = batch['v2p_map'].cuda()                       # (M, 1 + maxActive), int, cuda
 
-        coords_float = batch['locs_float'].cuda()  # (N, 3), float32, cuda
-        feats = batch['feats'].cuda()  # (N, C), float32, cuda
-        labels = batch['labels'].cuda()  # (N), long, cuda
-        instance_labels = batch['instance_labels'].cuda()  # (N), long, cuda, 0~total_nInst, -100
+        coords_float = batch['locs_float'].cuda()               # (N, 3), float32, cuda
+        feats = batch['feats'].cuda()                           # (N, C), float32, cuda
+        labels = batch['labels'].cuda()                         # (N), long, cuda
+        instance_labels = batch['instance_labels'].cuda()       # (N), long, cuda, 0~total_nInst, -100
 
-        instance_info = batch['instance_info'].cuda()  # (N, 9), float32, cuda, (meanxyz, minxyz, maxxyz)
-        instance_pointnum = batch['instance_pointnum'].cuda()  # (total_nInst), int, cuda
+        instance_info = batch['instance_info'].cuda()           # (N, 9), float32, cuda, (meanxyz, minxyz, maxxyz)
+        instance_pointnum = batch['instance_pointnum'].cuda()   # (total_nInst), int, cuda
 
-        batch_offsets = batch['offsets'].cuda()  # (B + 1), int, cuda
+        batch_offsets = batch['offsets'].cuda()                 # (B + 1), int, cuda
 
         spatial_shape = batch['spatial_shape']
 
