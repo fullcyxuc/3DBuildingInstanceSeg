@@ -583,7 +583,7 @@ def model_fn_decorator(test=False):
 
         input_ = spconv.SparseConvTensor(voxel_feats, voxel_coords.int(), spatial_shape, cfg.batch_size)
 
-        ret = model(input_, p2v_map, coords_float, coords[:, 0].int(), batch_offsets, epoch, 'test')
+        ret = model(input_, p2v_map, coords_float, coords[:, 0].int(), batch_offsets, epoch)
         semantic_scores = ret['semantic_scores']  # (N, nClass) float32, cuda
         pt_offsets = ret['pt_offsets']  # (N, 3), float32, cuda
 

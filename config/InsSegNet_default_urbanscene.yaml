@@ -76,7 +76,7 @@ TEST:
   TEST_NPOINT_THRESH: 100
 
   eval: True
-  save_semantic: False
+  save_semantic: True
   save_pt_offsets: False
-  save_instance: False
+  save_instance: True
 

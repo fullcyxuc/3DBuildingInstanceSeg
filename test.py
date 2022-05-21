@@ -37,7 +37,7 @@ def test(model, model_fn, data_name, epoch):
 
     if cfg.dataset == 'subsampling0.4':
         if data_name == 'urbanscene':
-            from Dataset.urbanscene import Dataset
+            from Dataset.urbanscene.urbanscene_inst import Dataset
             dataset = Dataset(test=True)
             dataset.testLoader()
         else:
@@ -59,7 +59,7 @@ def test(model, model_fn, data_name, epoch):
 
             # decode results for evaluation
             N = batch['feats'].shape[0]
-            test_scene_name = os.path.basename(dataset.test_file_names[int(batch['id'][0])].split('/')[-1]).strip('.pth')
+            test_scene_name = os.path.basename(dataset.test_file_names[int(batch['id'][0])].split('/')[-1]).strip('.txt')
             print (test_scene_name)
             semantic_scores = preds['semantic']  # (N, nClass=20) float32, cuda
             semantic_pred = semantic_scores.max(1)[1]  # (N) long, cuda
@@ -71,7 +71,8 @@ def test(model, model_fn, data_name, epoch):
                 proposals_idx, proposals_offset = preds['proposals']
                 # proposals_idx: (sumNPoint, 2), int, cpu, [:, 0] for cluster_id, [:, 1] for corresponding point idxs in N
                 # proposals_offset: (nProposal + 1), int, cpu
-                proposals_pred = torch.zeros((proposals_offset.shape[0] - 1, N), dtype=torch.int, device=scores_pred.device) 
+                proposals_pred = torch.zeros((proposals_offset.shape[0] - 1, N), dtype=torch.int, device=scores_pred.device)
+                proposals_pred[proposals_idx[:, 0].long(), proposals_idx[:, 1].long()] = 1
                 # (nProposal, N), int, cuda
 
                 semantic_id = torch.tensor(semantic_label_idx, device=scores_pred.device) \
@@ -258,8 +259,9 @@ if __name__ == '__main__':
     model_fn = model_fn_decorator(test=True)
 
     # load model
-    utils.checkpoint_restore(cfg, model, None, cfg.exp_path, cfg.config.split('/')[-1][:-5], 
-        use_cuda, cfg.test_epoch, dist=False, f=cfg.pretrain)      
+    utils.checkpoint_restore(model, cfg.exp_path, cfg.config.split('/')[-1][:-5],
+        use_cuda, cfg.test_epoch, dist=False, f=cfg.pretrain)
+
     # resume from the latest epoch, or specify the epoch to restore
 
     # evaluate

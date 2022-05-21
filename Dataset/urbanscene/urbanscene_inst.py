@@ -47,7 +47,7 @@ class Dataset:
         else:
             raise Exception
 
-        self.train_files = [pd.read_csv(i, delimiter=' ').to_numpy().astype(np.float32) for i in train_file_names]
+        self.train_files = [pd.read_csv(i, delimiter=' ', header=None).to_numpy().astype(np.float32) for i in train_file_names]
         # self.train_files = [torch.load(i) for i in train_file_names]
 
         logger.info('Training samples: {}'.format(len(self.train_files)))
@@ -82,7 +82,7 @@ class Dataset:
     def valLoader(self):
         val_file_names = sorted(
             glob.glob(os.path.join(self.data_root, self.dataset, 'val', '*' + self.filename_suffix)))
-        self.val_files = [pd.read_csv(i, delimiter=' ').to_numpy().astype(np.float32) for i in val_file_names]
+        self.val_files = [pd.read_csv(i, delimiter=' ', header=None).to_numpy().astype(np.float32) for i in val_file_names]
         # self.val_files = [torch.load(i) for i in val_file_names]
 
         logger.info('Validation samples: {}'.format(len(self.val_files)))
@@ -95,7 +95,7 @@ class Dataset:
     def testLoader(self):
         self.test_file_names = sorted(
             glob.glob(os.path.join(self.data_root, self.dataset, self.test_split, '*' + self.filename_suffix)))
-        self.test_files = [pd.read_csv(i, delimiter=' ').to_numpy().astype(np.float32) for i in self.test_file_names]
+        self.test_files = [pd.read_csv(i, delimiter=' ', header=None).to_numpy().astype(np.float32) for i in self.test_file_names]
         # self.test_files = [torch.load(i) for i in self.test_file_names]
 
         logger.info('Testing samples ({}): {}'.format(self.test_split, len(self.test_files)))
