@@ -4,6 +4,7 @@ GENERAL:
   model_dir: Model/model.py
   dataset_dir: Dataset/urbanscene/urbanscene_inst.py
   device: "cuda"
+  version_description: "1. offset only on xy plane; 2.offset prediction considering the neighbors"
 
 DATA:
   data_root: /media/xue/DATA/xue/UrbanSet/urban_merge/
@@ -14,32 +15,35 @@ DATA:
   ignore_label: -100
 
   input_channel: 3
-  scale: 2   # voxel_size = 1 / scale, scale 50(2cm) Deprecated
+  scale: 2   # voxel_size = 1 / scale, scale 50(2cm)
   batch_size: 1
-  full_scale: [128, 512]  # Deprecated
+  full_scale: [128, 512]
   max_npoint: 500000
   mode: 4 # 4=mean
 
   candidate_scale: 3000  # 1 / scale, 1 candidate for every 200 points
   max_candidate: 100
 
+  radius: 3.0  # radius of the queried ball
+  nsample: 15  # maximum number of point in the balls
+
 STRUCTURE:
-  model_name: InsSegNet3
+  model_name: InsSegNet4
   m: 16 # 16 or 32
   using_xyz: True
   using_rgb: True
   using_normal: False
-  block_residual: True  # Deprecated
-  block_reps: 2  # Deprecated
+  block_residual: True
+  block_reps: 2
 
   use_coords: True
 
 TRAIN:
-  epochs: 384
+  epochs: 385
   train_workers: 16 # data loader workers
   optim: Adam # Adam or SGD
   lr: 0.001
-  step_epoch: 384
+  step_epoch: 385
   multiplier: 0.5
   momentum: 0.9
   weight_decay: 0.0001
@@ -55,7 +59,7 @@ TRAIN:
   weight_pull: 1
   weight_reg: 0.1
 
-  score_scale: 2 # the minimal voxel size is 2cm   Deprecated
+  score_scale: 2 # the minimal voxel size is 2cm
   score_fullscale: 30
   score_mode: 4 # mean
 
@@ -67,16 +71,16 @@ TRAIN:
 
 TEST:
   split: val
-  test_epoch: 384
+  test_epoch: 385
   test_workers: 16
   test_seed: 567
 
   TEST_NMS_THRESH: 0.3
-  TEST_SCORE_THRESH: 0.09
+  TEST_SCORE_THRESH: 0.01
   TEST_NPOINT_THRESH: 100
 
   eval: True
-  save_semantic: True
+  save_semantic: False
   save_pt_offsets: False
-  save_instance: True
+  save_instance: False
 

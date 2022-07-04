@@ -80,9 +80,9 @@ class Dataset:
                                             drop_last=False, pin_memory=True)
 
     def valLoader(self):
-        val_file_names = sorted(
+        self.val_file_names = sorted(
             glob.glob(os.path.join(self.data_root, self.dataset, 'val', '*' + self.filename_suffix)))
-        self.val_files = [pd.read_csv(i, delimiter=' ', header=None).to_numpy().astype(np.float32) for i in val_file_names]
+        self.val_files = [pd.read_csv(i, delimiter=' ', header=None).to_numpy().astype(np.float32) for i in self.val_file_names]
         # self.val_files = [torch.load(i) for i in val_file_names]
 
         logger.info('Validation samples: {}'.format(len(self.val_files)))
@@ -303,7 +303,9 @@ class Dataset:
         batch_offsets = [0]
 
         total_inst_num = 0
+        scene_names = []
         for i, idx in enumerate(id):
+            scene_names.append(os.path.basename(self.val_file_names[idx].split('/')[-1]).strip('.txt'))
             data = self.val_files[idx]
             xyz_origin, rgb, label, instance_label = data[:, :3], data[:, 3:6], data[:, 6], data[:, 7]
             # xyz_origin, rgb, label, instance_label = self.val_files[idx]
@@ -366,7 +368,7 @@ class Dataset:
         return {'locs': locs, 'voxel_locs': voxel_locs, 'p2v_map': p2v_map, 'v2p_map': v2p_map,
                 'locs_float': locs_float, 'feats': feats, 'labels': labels, 'instance_labels': instance_labels,
                 'instance_info': instance_infos, 'instance_pointnum': instance_pointnum,
-                'id': id, 'offsets': batch_offsets, 'spatial_shape': spatial_shape}
+                'id': id, 'offsets': batch_offsets, 'spatial_shape': spatial_shape, 'scene_names': scene_names}
 
     def testMerge(self, id):
         locs = []
@@ -376,8 +378,9 @@ class Dataset:
         labels = []  #
 
         batch_offsets = [0]
+        scene_names = []
         for i, idx in enumerate(id):
-
+            scene_names.append(os.path.basename(self.test_file_names[idx].split('/')[-1]).strip('.txt'))
             if self.test_split == 'val':
                 data = self.test_files[idx]
                 xyz_origin, rgb, label, instance_label = data[:, :3], data[:, 3:6], data[:, 6], data[:, 7]
@@ -428,11 +431,11 @@ class Dataset:
             return {'locs': locs, 'voxel_locs': voxel_locs, 'p2v_map': p2v_map, 'v2p_map': v2p_map,
                     'locs_float': locs_float, 'feats': feats,
                     'id': id, 'offsets': batch_offsets, 'spatial_shape': spatial_shape,
-                    'labels': labels}
+                    'labels': labels, 'scene_names': scene_names}
 
         elif self.test_split == 'test':
             return {'locs': locs, 'voxel_locs': voxel_locs, 'p2v_map': p2v_map, 'v2p_map': v2p_map,
                     'locs_float': locs_float, 'feats': feats,
-                    'id': id, 'offsets': batch_offsets, 'spatial_shape': spatial_shape}
+                    'id': id, 'offsets': batch_offsets, 'spatial_shape': spatial_shape, "scene_names": scene_names}
         else:
             assert Exception

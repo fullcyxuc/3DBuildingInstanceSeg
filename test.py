@@ -35,8 +35,8 @@ def init():
 def test(model, model_fn, data_name, epoch):
     logger.info('>>>>>>>>>>>>>>>> Start Evaluation >>>>>>>>>>>>>>>>')
 
-    if cfg.dataset == 'subsampling0.4':
-        if data_name == 'urbanscene':
+    if cfg.dataset == 'subsampling0.4' or cfg.dataset == 'urbanscene2':
+        if data_name == 'urbanscene' or data_name == 'urbanscene2':
             from Dataset.urbanscene.urbanscene_inst import Dataset
             dataset = Dataset(test=True)
             dataset.testLoader()
@@ -60,7 +60,7 @@ def test(model, model_fn, data_name, epoch):
             # decode results for evaluation
             N = batch['feats'].shape[0]
             test_scene_name = os.path.basename(dataset.test_file_names[int(batch['id'][0])].split('/')[-1]).strip('.txt')
-            print (test_scene_name)
+            print(test_scene_name)
             semantic_scores = preds['semantic']  # (N, nClass=20) float32, cuda
             semantic_pred = semantic_scores.max(1)[1]  # (N) long, cuda
             pt_offsets = preds['pt_offsets']    # (N, 3), float32, cuda

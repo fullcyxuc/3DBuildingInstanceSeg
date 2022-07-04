@@ -165,8 +165,8 @@ if __name__ == '__main__':
     model_fn = model_fn_decorator()
 
     ##### dataset
-    if cfg.dataset == 'subsampling0.4':
-        if data_name == 'urbanscene':
+    if cfg.dataset == 'subsampling0.4' or cfg.dataset == 'urbanscene2':
+        if data_name == 'urbanscene' or data_name == 'urbanscene2':
             from Dataset.urbanscene import urbanscene_inst
             dataset = urbanscene_inst.Dataset()
             dataset.trainLoader()

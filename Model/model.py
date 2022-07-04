@@ -16,87 +16,137 @@ from lib.pointgroup_ops.functions import pointgroup_ops
 from util import utils
 
 ################################################################################################
-cnt = 0
+colors = np.array([[random.randint(0, 255), random.randint(0, 255), random.randint(0, 255)]
+                       for _ in range(200)]).astype(np.int)
+colors_ = np.array([
+    [0, 0, 0],
+    [255, 0, 0],
+    [0, 255, 0],
+    [0, 0, 255],
+    [156, 102, 31],
+    [255, 127, 80],
+    [255, 192, 203],
+    [255, 0, 255],
+    [0, 255, 255],
+    [8, 46, 84],
+    [34, 139, 34],
+    [107, 142, 35],
+    [192, 192, 192],
+    [255, 235, 205],
+    [255, 255, 0],
+    [255, 153, 18],
+    [227, 207, 87],
+    [255, 215, 0],
+    [199, 97, 20],
+    [188, 143, 143],
+    [138, 43, 226],
+    [218, 112, 214],
+    [118, 128, 105],
+    [0, 199, 140],
+    [128, 42, 42]
+]).astype(np.int)
+colors[:colors_.shape[0]] = colors_
 
-def save4visualize(batch, ret):
-    dst = "/media/xue/DATA1/xue/temp/vis_output_epoch368"
+################################################################################################
 
-    xyz = batch['locs_float'].numpy()  # np.float, (N, 3)
-    labels = batch['labels'].numpy()  # np.int, (N)
-    instance_labels = batch['instance_labels'].numpy()
-    batch_offsets = batch['offsets'].numpy()  # (B + 1, )
+def save4visualize(batch, ret, mode):
+    mode = 'val' if mode == 'test' else mode
+    # dst = "/media/xue/DATA1/xue/temp/vis_output_epoch368"
+    dst = "/media/xue/DATA1/xue/temp/val_output_InsSegNet4_offset_neighbor"
+    data_root = "/media/xue/DATA/xue/UrbanSet/urban_merge/subsampling0.4"
+
+    scene_name = batch['scene_names'][0]  # in case batch size is 1
+    origin_data = np.loadtxt(os.path.join(data_root, mode, scene_name + '.txt'))
+    xyz = batch['locs_float'].numpy()
+
+    if mode == 'train':
+        labels = batch['labels'].numpy()  # np.int, (N)
+        instance_labels = batch['instance_labels'].numpy()
+    else:
+        labels = origin_data[:, -2].astype(np.int)
+        instance_labels = origin_data[:, -1].astype(np.int)
 
     semantic_scores = ret['semantic_scores'].cpu().detach().numpy()  # (N, nClasses)
-    embedding_feats = ret['embedding_feats'].cpu().detach().numpy()  # (N, nDim)
-    pos_feats = ret['pos_feats'].cpu().detach().numpy()  # (N, nDim)
     pt_offsets = ret['pt_offsets'].cpu().detach().numpy()  # (N, 3)
 
     proposals_idx = ret['proposals_idx'].cpu().detach().numpy()  # (N', 2) 0 for proposal_label, 1 for point_idx in N
-    proposals_offset = ret['proposals_offset'].cpu().detach().numpy()  # (nProposal + 1, )
     object_idxs = ret['object_idxs'].cpu().detach().numpy()  # (N', )
     candidate_idx = ret['candidate_idx'].cpu().detach().numpy()  # (M, ) index from object points
 
-    colors = np.array([[random.randint(0, 255), random.randint(0, 255), random.randint(0, 255)]
-                       for _ in range(200)]).astype(np.int)
-
     # candidate
     candidate_xyz = xyz[object_idxs][candidate_idx]
-    candidate_color = np.array([[0, 0, 255] for _ in range(candidate_xyz.shape[0])])
-
     candidate_offset = pt_offsets[object_idxs][candidate_idx]
-    candidate_xyz_offset = candidate_xyz + candidate_offset
-    candidate_offset_color = np.array([[255, 0, 0] for _ in range(candidate_xyz.shape[0])])
+    if pt_offsets.shape[1] == 3:
+        candidate_xyz_shifted = candidate_xyz + candidate_offset
+    else:
+        candidate_xyz_shifted = candidate_xyz[:, :2] + candidate_offset
+        candidate_xyz_shifted = np.insert(candidate_xyz_shifted, 2, np.min(xyz[:, -1]) - 5, axis=-1)
+
+    candidate_xyz_shifted_neighbor = None
+    if 'candidate_xyz_shifted_neighbor' in ret:
+        candidate_xyz_shifted_neighbor = ret['candidate_xyz_shifted_neighbor'].cpu().detach().numpy()
+        if candidate_xyz_shifted_neighbor.shape[1] == 2:
+            candidate_xyz_shifted_neighbor = np.insert(candidate_xyz_shifted_neighbor, 2, np.min(xyz[:, -1]) - 5,
+                                                       axis=-1)
 
     # pred
     sem_pred = np.argmax(semantic_scores, axis=-1)
     sem_pred_color = colors[sem_pred]
 
     ins_pred_color = np.array([[0, 0, 0] for _ in range(xyz.shape[0])])
+    proposals_idx[:, 0] += 1
     ins_pred_color[proposals_idx[:, 1]] = colors[proposals_idx[:, 0]]
 
-    # gt
+    # candidate center color
+    candidate_color = ins_pred_color[object_idxs][candidate_idx]
+
+    # gt color
     sem_gt_color = colors[labels]
+    instance_labels[instance_labels != -100] += 1
+    instance_labels[instance_labels == -100] = 0
     ins_gt_color = colors[instance_labels]
 
-    global cnt
+    # np.save(os.path.join(dst, scene_name + "_semantic_scores"), semantic_scores)
+    # np.save(os.path.join(dst, scene_name + "_semantic_labels"), labels.reshape(-1, 1))
 
-    with open(os.path.join(dst, str(cnt) + "_candidate_xyz.txt"), "w") as writer:
+    with open(os.path.join(dst, scene_name + "_candidate_xyz.txt"), "w") as writer:
         for i in range(candidate_xyz.shape[0]):
             writer.write(str(candidate_xyz[i][0]) + " " + str(candidate_xyz[i][1]) + " " + str(candidate_xyz[i][2]) + " " +
                          str(candidate_color[i][0]) + " " + str(candidate_color[i][1]) + " " + str(candidate_color[i][2]) +
                          "\n")
-    with open(os.path.join(dst, str(cnt) + "_candidate_xyz_offset.txt"), "w") as writer:
-        for i in range(candidate_xyz_offset.shape[0]):
-            writer.write(str(candidate_xyz_offset[i][0]) + " " + str(candidate_xyz_offset[i][1]) + " " + str(candidate_xyz_offset[i][2]) + " " +
-                         str(candidate_offset_color[i][0]) + " " + str(candidate_offset_color[i][1]) + " " + str(candidate_offset_color[i][2]) +
+    with open(os.path.join(dst, scene_name + "_candidate_xyz_shifted.txt"), "w") as writer:
+        for i in range(candidate_xyz_shifted.shape[0]):
+            writer.write(str(candidate_xyz_shifted[i][0]) + " " + str(candidate_xyz_shifted[i][1]) + " " + str(candidate_xyz_shifted[i][2]) + " " +
+                         str(candidate_color[i][0]) + " " + str(candidate_color[i][1]) + " " + str(candidate_color[i][2]) +
                          "\n")
-
-    # with open(os.path.join(dst, str(cnt) + "_sem_pred.txt"), "w") as writer:
+    with open(os.path.join(dst, scene_name + "_candidate_xyz_shifted_neighbor.txt"), "w") as writer:
+        for i in range(candidate_xyz_shifted_neighbor.shape[0]):
+            writer.write(str(candidate_xyz_shifted_neighbor[i][0]) + " " + str(candidate_xyz_shifted_neighbor[i][1]) + " " + str(candidate_xyz_shifted_neighbor[i][2]) + " " +
+                         str(candidate_color[i][0]) + " " + str(candidate_color[i][1]) + " " + str(candidate_color[i][2]) +
+                         "\n")
+    #
+    # with open(os.path.join(dst, scene_name + "_sem_pred.txt"), "w") as writer:
     #     for i in range(xyz.shape[0]):
     #         writer.write(str(xyz[i][0]) + " " + str(xyz[i][1]) + " " + str(xyz[i][2]) + " " +
     #                      str(sem_pred_color[i][0]) + " " + str(sem_pred_color[i][1]) + " " + str(sem_pred_color[i][2]) +
     #                      "\n")
-
-    with open(os.path.join(dst, str(cnt) + "_ins_merge_pred.txt"), "w") as writer:
+    with open(os.path.join(dst, scene_name + "_ins_merge_pred.txt"), "w") as writer:
         for i in range(xyz.shape[0]):
             writer.write(str(xyz[i][0]) + " " + str(xyz[i][1]) + " " + str(xyz[i][2]) + " " +
                          str(ins_pred_color[i][0]) + " " + str(ins_pred_color[i][1]) + " " + str(ins_pred_color[i][2]) +
                          "\n")
-
-    # with open(os.path.join(dst, str(cnt) + "_sem_gt.txt"), "w") as writer:
+    #
+    # with open(os.path.join(dst, scene_name + "_sem_gt.txt"), "w") as writer:
     #     for i in range(xyz.shape[0]):
     #         writer.write(str(xyz[i][0]) + " " + str(xyz[i][1]) + " " + str(xyz[i][2]) + " " +
     #                      str(sem_gt_color[i][0]) + " " + str(sem_gt_color[i][1]) + " " + str(sem_gt_color[i][2]) +
     #                      "\n")
     #
-    # with open(os.path.join(dst, str(cnt) + "_ins_gt.txt"), "w") as writer:
+    # with open(os.path.join(dst, scene_name + "_ins_gt.txt"), "w") as writer:
     #     for i in range(xyz.shape[0]):
     #         writer.write(str(xyz[i][0]) + " " + str(xyz[i][1]) + " " + str(xyz[i][2]) + " " +
     #                      str(ins_gt_color[i][0]) + " " + str(ins_gt_color[i][1]) + " " + str(ins_gt_color[i][2]) +
     #                      "\n")
-
-    cnt += 1
-
 ################################################################################################
 
 
@@ -270,7 +320,7 @@ class InstanceSegPipline(nn.Module):
             norm_fn(m),
             nn.ReLU()
         )
-        self.offset_linear = nn.Linear(m, 3, bias=True)
+        self.offset_linear = nn.Linear(m, 2, bias=True)
 
         #### score branch
         self.score_encoder = nn.Sequential(
@@ -338,7 +388,7 @@ class InstanceSegPipline(nn.Module):
                 bfs(i)
         return ccs
 
-    def proposal_generation(self, feats, candidate_feats, candidate_xyz, batch_offsets, candidates_batch_offsets):
+    def proposal_generation(self, feats, candidate_feats, candidate_xyz_shifted, batch_offsets, candidates_batch_offsets):
         proposal_idx = []
         proposals_offset = []
         proposal_num_batch = [0]
@@ -347,7 +397,7 @@ class InstanceSegPipline(nn.Module):
             feats_batch_i = feats[batch_offsets[i]: batch_offsets[i + 1]]  # (N_i, F)
             candidate_feats_batch_i = candidate_feats[
                                       candidates_batch_offsets[i]: candidates_batch_offsets[i + 1]]  # (K_i, F)
-            candidate_xyz_batch_i = candidate_xyz[candidates_batch_offsets[i]: candidates_batch_offsets[i + 1]]
+            candidate_xyz_shifted_batch_i = candidate_xyz_shifted[candidates_batch_offsets[i]: candidates_batch_offsets[i + 1]]
             ncandidate = candidate_feats_batch_i.size(0)
 
             ## relation matrix between all points and candidate points [N_i, K_i]
@@ -357,10 +407,11 @@ class InstanceSegPipline(nn.Module):
 
             ## merge the proposal
             # relation matrix between candidate points for merging [K_i, K_i]
-            relation_matrix_proposals = torch.norm(candidate_xyz_batch_i.unsqueeze(1) -
-                                                   candidate_xyz_batch_i.unsqueeze(0), dim=-1, p=2)
+            relation_matrix_proposals = torch.norm(candidate_xyz_shifted_batch_i.unsqueeze(1) -
+                                                   candidate_xyz_shifted_batch_i.unsqueeze(0), dim=-1, p=2)
             adjacency = torch.zeros_like(relation_matrix_proposals, dtype=torch.long)
-            adjacency[relation_matrix_proposals < 8] = 1  # 0-1 matrix, 1 for two proposals belong to each other
+            adjacency[relation_matrix_proposals < 10] = 1  # 0-1 matrix, 1 for two proposals belong to each other
+
             # calculate the connection components of the relation matrix
             ccs = self.cal_connection_components(adjacency)
             del relation_matrix_proposals, adjacency
@@ -494,7 +545,7 @@ class InstanceSegPipline(nn.Module):
 
         # offset encoding
         pt_offsets_feats = self.offset_encoder(output_feats)
-        pt_offsets = self.offset_linear(pt_offsets_feats)  # (N, 3), float32
+        pt_offsets = self.offset_linear(pt_offsets_feats)  # (N, 2), float32
         ret['pt_offsets'] = pt_offsets
 
         feats = torch.cat((semantic_feats, embedding_feats, pos_feats), dim=-1)
@@ -516,7 +567,7 @@ class InstanceSegPipline(nn.Module):
 
             # assume the num_candidates for each batch are different
             candidates_batch_cnt = xyz_batch_cnt // self.cfg.candidate_scale
-            candidates_batch_cnt = torch.clamp(candidates_batch_cnt, 10, self.cfg.max_candidate).int()
+            candidates_batch_cnt = torch.clamp(candidates_batch_cnt, 20, self.cfg.max_candidate).int()
 
             candidates_batch_offsets = torch.tensor([0] * batch_offsets_.size(0),
                                                     device=batch_offsets_.device).int()  # (B + 1,)
@@ -525,10 +576,23 @@ class InstanceSegPipline(nn.Module):
 
             candidate_idx = self.select(coords_, feats_, xyz_batch_cnt, candidates_batch_cnt)  # select module
             candidate_feats = feats_[candidate_idx]  # (M, F)
-            candidate_offset = pt_offsets_[candidate_idx]
-            candidate_xyz_offseted = coords_[candidate_idx] + candidate_offset
+
+            # calculate the offset for each candidate point by considering their neighbors
+            # (M, K) index of K neighbors in ball query for each candidate point
+            candidate_neighbors = pointnet2_utils.ball_query(self.cfg.radius, self.cfg.nsample, coords_, xyz_batch_cnt,
+                                                             coords_[candidate_idx], candidates_batch_cnt)
+            candidate_neighbors = candidate_neighbors[0].long().reshape(-1, )  # (M * K, )
+            candidate_neighbors_offset = pt_offsets_[candidate_neighbors]  # (M * K, 3 or 2)
+            candidate_neighbors_offset = candidate_neighbors_offset.reshape(-1, self.cfg.nsample, 2)  # (M, K, 3 or 2)
+            candidate_offset = torch.mean(candidate_neighbors_offset, dim=1, keepdim=False)  # (M, 3 or 2)
+
+            # candidate_offset = pt_offsets_[candidate_idx]
+            if candidate_offset.size(1) == 3:
+                candidate_xyz_shifted = coords_[candidate_idx] + candidate_offset
+            else:
+                candidate_xyz_shifted = coords_[candidate_idx][:, :2] + candidate_offset
             # proposal generation
-            proposals_idx, proposals_offset = self.proposal_generation(feats_, candidate_feats, candidate_xyz_offseted,
+            proposals_idx, proposals_offset = self.proposal_generation(feats_, candidate_feats, candidate_xyz_shifted,
                                                                        batch_offsets_, candidates_batch_offsets)
             proposals_idx[:, 1] = object_idxs[proposals_idx[:, 1].long()].int()
             # proposals_idx: (sumNPoint, 2), int, dim 0 for cluster_id, dim 1 for corresponding point idxs in N
@@ -537,6 +601,7 @@ class InstanceSegPipline(nn.Module):
             torch.cuda.empty_cache()
 
             # # for debug to output some intermediate results
+            # ret['candidate_xyz_shifted_neighbor'] = candidate_xyz_shifted
             # ret['proposals_idx'] = proposals_idx
             # ret['proposals_offset'] = proposals_offset
             # ret['object_idxs'] = object_idxs
@@ -584,6 +649,8 @@ def model_fn_decorator(test=False):
         input_ = spconv.SparseConvTensor(voxel_feats, voxel_coords.int(), spatial_shape, cfg.batch_size)
 
         ret = model(input_, p2v_map, coords_float, coords[:, 0].int(), batch_offsets, epoch)
+        # for debug to output some intermediate results
+        # save4visualize(batch, ret, 'test')
         semantic_scores = ret['semantic_scores']  # (N, nClass) float32, cuda
         pt_offsets = ret['pt_offsets']  # (N, 3), float32, cuda
 
@@ -634,7 +701,7 @@ def model_fn_decorator(test=False):
         ret = model(input_, p2v_map, coords_float, coords[:, 0].int(), batch_offsets, epoch)
 
         # # for debug to output some intermediate results
-        # save4visualize(batch, ret)
+        # save4visualize(batch, ret, 'train')
 
         embedding_feats = ret['embedding_feats']  # [B, N, F] embedding feats for calculating the embedding loss
         semantic_scores = ret['semantic_scores']  # [N, nclass]
@@ -690,12 +757,15 @@ def model_fn_decorator(test=False):
 
         '''offset loss'''
         pt_offsets, coords, instance_info, instance_labels = loss_inp['pt_offsets']
-        # pt_offsets: (N, 3), float, cuda
+        # pt_offsets: (N, 3) or (N, 2), float, cuda
         # coords: (N, 3), float32
         # instance_info: (N, 9), float32 tensor (meanxyz, minxyz, maxxyz)
         # instance_labels: (N), long
 
-        gt_offsets = instance_info[:, 0:3] - coords  # (N, 3)
+        if pt_offsets.size(1) == 3:
+            gt_offsets = instance_info[:, :3] - coords  # (N, 3)
+        else:
+            gt_offsets = instance_info[:, :2] - coords[:, :2]  # (N, 3)
         pt_diff = pt_offsets - gt_offsets  # (N, 3)
         pt_dist = torch.sum(torch.abs(pt_diff), dim=-1)  # (N)
         valid = (instance_labels != cfg.ignore_label).float()

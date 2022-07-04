@@ -29,7 +29,7 @@ def getFiles(files,fileSplit):
     return res
 
 def dataAug(file,semanticKeep):
-    points = pd.read_csv(file, header = None).values
+    points = pd.read_csv(file, header=None, delimiter=' ').values
     angle = random.randint(1, 359)
     angleRadians = math.radians(angle)
     rotationMatrix = np.array([[math.cos(angleRadians), -math.sin(angleRadians), 0], [math.sin(angleRadians), math.cos(angleRadians), 0], [0, 0, 1]])
@@ -38,6 +38,7 @@ def dataAug(file,semanticKeep):
     return pointsKept
 
 def preparePthFiles(files, split, outPutFolder, AugTimes=0):
+    point_cnt = 0
     ### save the coordinates so that we can merge the data to a single scene after segmentation for visualization
     outJsonPath = os.path.join(outPutFolder, 'coordShift.json')
     coordShift = {}
@@ -70,7 +71,7 @@ def preparePthFiles(files, split, outPutFolder, AugTimes=0):
                 coordShift['globalShift'] = list(points[:, :3].min(0))
             points[:, :3] = points[:, :3] - points[:, :3].min(0)
 
-            stride = 75 if split == 'train' else 150
+            stride = 85 if split == 'train' else 150
             blocks = splitPointCloud(points, size=150, stride=stride)
             for blockNum, block in enumerate(blocks):
                 if (len(block) > 50000):
@@ -81,8 +82,8 @@ def preparePthFiles(files, split, outPutFolder, AugTimes=0):
                                                                zThreshold - (block[:, 2].max(0) - block[:, 2].min(0))),
                                                    block[:, 3].mean(0), block[:, 4].mean(0), block[:, 5].mean(0),
                                                    -100, -100]], axis=0)
-                        print("range z is smaller than threshold ")
-                        print(name + str(blockNum) + '_inst_nostuff')
+                        # print("range z is smaller than threshold ")
+                        # print(name + str(blockNum) + '_inst_nostuff')
                     if split != 'test':
                         outFileName = name + str(blockNum) + '_inst_nostuff'
                         coordShift[outFileName] = list(block[:, :3].mean(0))
@@ -123,9 +124,9 @@ def preparePthFiles(files, split, outPutFolder, AugTimes=0):
                         if (split == 'train' or split == 'val') and (
                                 # len(uniqueInstances) < 2 or (len(uniqueSemantics) >= (len(uniqueInstances) - 2))):
                                 len(uniqueInstances) < 2 or (len(uniqueSemantics) < 2)):
-                            print("unique insance: %d" % len(uniqueInstances))
-                            print("unique semantic: %d" % len(uniqueSemantics))
-                            print()
+                            # print("unique insance: %d" % len(uniqueInstances))
+                            # print("unique semantic: %d" % len(uniqueSemantics))
+                            # print()
                             counter += 1
                         else:
                             # torch.save((coords, colors, sem_labels, instance_labels), outFilePath)
@@ -136,6 +137,7 @@ def preparePthFiles(files, split, outPutFolder, AugTimes=0):
                                 outFile.write("%f %f %f %f %f %f %d %d\n" %(coords[i][0],coords[i][1],coords[i][2],
                                                                             colors[i][0],colors[i][1],colors[i][2],
                                                                             sem_labels[i],instance_labels[i]))
+                            point_cnt += len(coords)
                     else:
                         # torch.save((coords, colors), outFilePath)
                         # save text file for each pth file
@@ -144,7 +146,10 @@ def preparePthFiles(files, split, outPutFolder, AugTimes=0):
                         for i in range(len(coords)):
                             outFile.write("%f %f %f %f %f %f\n" %(coords[i][0],coords[i][1],coords[i][2],
                                                                         colors[i][0],colors[i][1],colors[i][2]))
+                        point_cnt += len(coords)
+
     print("Total skipped file :%d" % counter)
+    print("%s total points nums : %d", split, point_cnt)
     json.dump(coordShift, open(outJsonPath, 'w'))
 
 def prepareInstGt(valOutDir, val_gtFolder,semantic_label_idxs):
@@ -175,25 +180,29 @@ def prepareInstGt(valOutDir, val_gtFolder,semantic_label_idxs):
 
 if __name__ == '__main__':
 
-    data_folder = "/media/xue/DATA/xue/UrbanSet/urban_merge/subsampling0.4"
+    data_folder = "/media/xue/DATA/xue/UrbanSet/urban_merge/subsampling0.4/"
+    out_folder = "/media/xue/DATA1/xue/urbanset2/urbanscene2"
     filesOri = sorted(glob.glob(data_folder + '/*.txt'))
 
     trainSplit = [1, 2, 4, 5, 7]
     trainFiles = getFiles(filesOri, trainSplit)
     split = 'train'
-    trainOutDir = os.path.join(data_folder, split)
+    # trainOutDir = os.path.join(data_folder, split)
+    trainOutDir = os.path.join(out_folder, split)
     os.makedirs(trainOutDir, exist_ok=True)
-    # preparePthFiles(trainFiles, split, trainOutDir, AugTimes=0)
+    preparePthFiles(trainFiles, split, trainOutDir, AugTimes=0)
+
 
     valSplit = [3, 6, 8]
     split = 'val'
     valFiles = getFiles(filesOri, valSplit)
-    valOutDir = os.path.join(data_folder,split)
+    # valOutDir = os.path.join(data_folder,split)
+    valOutDir = os.path.join(out_folder, split)
     os.makedirs(valOutDir, exist_ok=True)
-    # preparePthFiles(valFiles, split, valOutDir)
+    preparePthFiles(valFiles, split, valOutDir)
 
     semantic_label_idxs = [0, 1]
     semantic_label_names = ['ground', 'Building']
-    val_gtFolder = os.path.join(data_folder, 'val_gt')
+    val_gtFolder = os.path.join(out_folder, 'val_gt')
     os.makedirs(val_gtFolder, exist_ok=True)
     prepareInstGt(valOutDir, val_gtFolder, semantic_label_idxs)
